@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "warrant-toxicity"
+version = "0.1.0"
+description = "Taiwan warrant retail-flow toxicity: markouts, spread decomposition and an out-of-sample toxicity score from the issuer's side."
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26,<3",
+    "pandas>=2.1,<4",
+    "scipy>=1.11,<2",
+    "pyarrow>=14",
+    "openpyxl>=3.1,<4",
+]
+
+[project.optional-dependencies]
+plot = ["matplotlib>=3.8,<4"]
+shioaji = ["shioaji==1.5.9"]
+dev = ["pytest>=8,<10"]
+
+[tool.setuptools.packages.find]
+include = ["wtox*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

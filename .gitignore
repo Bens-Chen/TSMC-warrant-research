@@ -1,0 +1,24 @@
+# Raw and derived market data are licensed (TEJ / Shioaji / TWSE): never commit them.
+*.parquet
+*.csv
+*.xlsx
+*.xls
+*.feather
+/data/
+*.log
+
+# Secrets
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ipynb_checkpoints/
+.DS_Store
+
+# Claude local settings
+.claude/settings.local.json
