@@ -98,3 +98,10 @@ def test_budget_stops_and_newest_day_goes_first(tmp_path):
     s = _run(api, tmp_path, _todo(), max_mb=0.5)
     assert s["stopped_by_budget"] and s["days"] == 1
     assert api.calls[0][1] == "2025-03-04"  # newest first
+
+
+def test_reserve_stops_before_the_account_quota_runs_out(tmp_path):
+    api = FakeAPI(cost=300_000, limit=1_000_000)    # 1 MB quota left
+    s = _run(api, tmp_path, _todo(), max_mb=10_000, reserve_mb=0.5)
+    assert s["stopped_by_budget"] and s["days"] == 1
+    assert not list(tmp_path.rglob("*.tmp"))

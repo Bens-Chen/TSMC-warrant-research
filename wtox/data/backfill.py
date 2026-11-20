@@ -17,7 +17,7 @@ stopped by the budget or an error continues where it left off. Empty results are
 they are retried next time.
 
     python -m wtox.data.backfill --data ../data --start 2025-01-02 --end 2026-11-18 \
-        --env-file "<path to .env>" --max-mb 400
+        --env-file "<path to .env>" --max-mb 100000 --reserve-mb 100   # use the quota, keep 100 MB
 """
 
 import argparse
@@ -67,12 +67,20 @@ def _retry(fn, tries=3, wait=2.0):
             time.sleep(wait * (i + 1))
 
 
+def _write(df, path):
+    """Write via a temp file + rename, so an interrupted run never leaves a half file that looks done."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".parquet.tmp")
+    df.to_parquet(tmp, index=False)
+    os.replace(tmp, path)
+
+
 def run(api, data_dir, todo, make_contract, stock_contract, underlying="2330", max_mb=400.0,
-        throttle=0.12, newest_first=True, log=print):
+        throttle=0.12, newest_first=True, log=print, reserve_mb=20.0):
     """Download every row of `todo` (from work_list). Returns a summary dict."""
     data_dir = Path(data_dir)
     out = data_dir / "shioaji"
-    budget = Budget(api, max_mb)
+    budget = Budget(api, max_mb, reserve_mb)
     summary = {"days": 0, "files": 0, "ticks": 0, "empty": 0, "errors": 0, "stopped_by_budget": False}
     days = sorted(todo["day"].unique(), reverse=newest_first)
     for n, day in enumerate(days, 1):
@@ -83,8 +91,7 @@ def run(api, data_dir, todo, make_contract, stock_contract, underlying="2330", m
         if not spath.exists():
             s = to_frame(_retry(lambda: api.ticks(stock_contract, date=day)), TICK_COLUMNS)
             if len(s):
-                spath.parent.mkdir(parents=True, exist_ok=True)
-                s.to_parquet(spath, index=False)
+                _write(s, spath)
             time.sleep(throttle)
         rows = []
         for r in todo[todo["day"] == day].itertuples(index=False):
@@ -98,9 +105,7 @@ def run(api, data_dir, todo, make_contract, stock_contract, underlying="2330", m
             vol = int(df["volume"].sum()) if len(df) else 0
             if len(df):
                 df.insert(0, "warrant_id", r.code)
-                path = out / "ticks" / day / f"{r.code}.parquet"
-                path.parent.mkdir(parents=True, exist_ok=True)
-                df.to_parquet(path, index=False)
+                _write(df, out / "ticks" / day / f"{r.code}.parquet")
                 summary["files"] += 1
                 summary["ticks"] += len(df)
             else:
@@ -108,11 +113,10 @@ def run(api, data_dir, todo, make_contract, stock_contract, underlying="2330", m
             rows.append((day, r.code, r.tej_id, r.tej_volume, len(df), vol, ""))
             time.sleep(throttle)
         lpath = out / "backfill_log" / f"{day}.parquet"
-        lpath.parent.mkdir(parents=True, exist_ok=True)
         new = pd.DataFrame(rows, columns=["day", "code", "tej_id", "tej_volume", "n_ticks", "tick_volume", "error"])
         if lpath.exists():  # a resumed day: keep earlier rows, newest result per code wins
             new = pd.concat([pd.read_parquet(lpath), new]).drop_duplicates("code", keep="last")
-        new.to_parquet(lpath, index=False)
+        _write(new, lpath)
         summary["days"] += 1
         if n % 10 == 0 or n == len(days):
             log(f"  {n}/{len(days)} 天（{day}），檔案 {summary['files']}，空 {summary['empty']}，"
@@ -129,7 +133,9 @@ def main(argv=None):
     p.add_argument("--end", required=True)
     p.add_argument("--underlying", default="2330")
     p.add_argument("--env-file", default=os.environ.get("SHIOAJI_ENV_FILE"))
-    p.add_argument("--max-mb", type=float, default=400)
+    p.add_argument("--max-mb", type=float, default=400, help="cap on this run's usage")
+    p.add_argument("--reserve-mb", type=float, default=20,
+                   help="stop when the account's remaining daily quota falls to this (keep some for daily jobs)")
     p.add_argument("--limit-days", type=int, default=0, help="only the newest N days (for a trial run)")
     a = p.parse_args(argv)
 
@@ -152,7 +158,7 @@ def main(argv=None):
               fetch_contract=True, contracts_timeout=60000)
     try:
         run(api, a.data, todo, lambda code: sj.Stock(exchange="TSE", code=code, security_type="STK"),
-            api.Contracts.Stocks[a.underlying], a.underlying, a.max_mb)
+            api.Contracts.Stocks[a.underlying], a.underlying, a.max_mb, reserve_mb=a.reserve_mb)
     finally:
         try:
             api.logout()
