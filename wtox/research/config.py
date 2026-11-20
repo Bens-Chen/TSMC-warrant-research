@@ -15,6 +15,12 @@ TEST_START = "2026-01-02"
 EXCLUDED_DAYS = frozenset({"2026-01-09"})   # Shioaji has no warrant ticks that day (CLAUDE.md §2)
 
 
+def check_unlocked(day):
+    """Stage 5 lock (CLAUDE.md §10): analysis code must not read test-period days before the one run."""
+    if str(day)[:10] >= TEST_START and not TEST_UNLOCKED:
+        raise PermissionError(f"{day}: test period is locked (config.TEST_UNLOCKED = False, CLAUDE.md §10 stage 5)")
+
+
 def in_sample(day):
     """True for a YYYY-MM-DD day inside the study window and not excluded (⭐ CLAUDE.md §2)."""
     return SAMPLE_START <= day <= SAMPLE_END and day not in EXCLUDED_DAYS
@@ -106,6 +112,22 @@ ROBUST_MIN_DAY_COVERAGE = 0.95               # only days whose volume coverage >
 H4_EXTREME_DAY_QUANTILE = 0.99               # drop days above this quantile of |2330 day return| / |flow|
 H4_TAIL_EDGES = (0.0, 0.05, 0.50, 0.95, 1.0) # residual-flow quantile groups
 H4_SHORT_DTE_DAYS = 90                       # flow split: <= 90 days to expiry vs longer
+
+# --- stage 5 pre-registration (CLAUDE.md §10, 2026-11-21, before any 2026 data is read) -----------
+TEST_UNLOCKED = False                        # reading any day >= TEST_START raises until this is True (one run)
+DRY_RUN_SPLIT = "2025-06-30"                 # pipeline check before unlocking: fit <= this, "test" on the rest of 2025
+SCORE_TARGET = f"M_dt_{MAIN_HORIZON}"
+SCORE_AGE_CLIP_S = 16200                     # prev_quote_age_s clipped to one session (4.5 h), then log1p
+SCORE_WINSOR_Q = (0.01, 0.99)                # half spread and momentum terms winsorised at training quantiles
+SCORE_QUANTILES = 5                          # evaluation groups, cut points from training predictions
+HEATMAP_NOTIONAL_EDGES = (0, 10_000, 100_000, float("inf"))     # single-trade notional, NTD
+HEATMAP_NOTIONAL_LABELS = ("<1萬", "1–10萬", ">10萬")
+HEATMAP_MIN_TRADES = 500                     # cells kept only if the TRAINING sample has >= 500 trades
+HEATMAP_MIN_DAYS = 30                        #   and >= 30 trading days; the same cell list is used in 2026
+FUTURES_CONTRACT_SHARES = 2000               # 2330 stock futures: 2,000 shares per contract
+FUTURES_FEE_PER_CONTRACT = 20.0              # NTD per side (assumption)
+FUTURES_TICKS = ((1000, 5.0), (500, 1.0), (100, 0.5), (50, 0.1), (10, 0.05), (0, 0.01))   # (price floor, tick)
+REPLICATION_ALPHA = 0.05
 
 # --- H4: warrant flow predicts 2330 (CLAUDE.md §3.7); main settings pre-registered 2026-11-20 --------
 H4_GRID = pd.Timedelta(minutes=1)            # τ grid spacing

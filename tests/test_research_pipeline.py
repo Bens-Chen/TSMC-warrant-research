@@ -23,3 +23,13 @@ def test_steps_run_in_order(monkeypatch, tmp_path):
     assert calls[4][1] == ()                                    # no dividend file yet
     with pytest.raises(ValueError):
         pipeline.run(tmp_path, steps=["nope"])
+
+
+def test_test_period_is_locked(monkeypatch):
+    from wtox.research import config
+    monkeypatch.setattr(config, "TEST_UNLOCKED", False)
+    config.check_unlocked("2025-12-31")
+    with pytest.raises(PermissionError):
+        config.check_unlocked("2026-01-02")
+    monkeypatch.setattr(config, "TEST_UNLOCKED", True)
+    config.check_unlocked("2026-01-02")

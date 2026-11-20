@@ -195,6 +195,7 @@ def stage3_days(panel_dir):
 
 
 def load_day(day, data_dir):
+    config.check_unlocked(day)
     data_dir = Path(data_dir)
     p = pd.read_parquet(data_dir / "panel" / "tsmc_warrant_trades" / f"{day}.parquet")
     lab = pd.read_parquet(data_dir / "labels" / "tsmc_warrant_trades" / f"{day}.parquet")

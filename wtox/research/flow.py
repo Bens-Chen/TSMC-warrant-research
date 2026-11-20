@@ -54,13 +54,16 @@ def stock_windows(stock, day):
     sign = np.select([s["tick_type"] == 1, s["tick_type"] == 2], [1.0, -1.0], 0.0)
     if len(sign):
         sign[0] = 0.0          # the day's first print is the opening call auction: no aggressor side
-    mid = quote_mid(s["bid_price"], s["ask_price"]).fillna(s["close"]).to_numpy(float)
+    qm = quote_mid(s["bid_price"], s["ask_price"])
+    mid = qm.fillna(s["close"]).to_numpy(float)
+    spread = ((s["ask_price"] - s["bid_price"]) / qm * 1e4).to_numpy(float)     # NaN when the quote is invalid
     at = lambda x: np.searchsorted(t, x.to_numpy(), side="right") - 1    # last tick at or before x
     i_now, i_past = at(tau), at(tau - k)
     pick = lambda i: np.where(i >= 0, mid[np.clip(i, 0, None)], np.nan)
     return pd.DataFrame({"tau": tau, "stock_shares": _window_sum(t, shares, tau, k),
                          "stock_signed": _window_sum(t, shares * sign, tau, k),
-                         "S_mid_now": pick(i_now), "S_mid_past": pick(i_past)})
+                         "S_mid_now": pick(i_now), "S_mid_past": pick(i_past),
+                         "S_spread_bps_now": np.where(i_now >= 0, spread[np.clip(i_now, 0, None)], np.nan)})
 
 
 def build_flow(panel, stock, day, denom):
@@ -138,6 +141,7 @@ def h4_frame(days, data_dir, horizon):
     h = config.HORIZONS[horizon]
     rows = []
     for day in days:
+        config.check_unlocked(day)
         f = pd.read_parquet(data_dir / "flow" / f"{day}.parquet")
         g = pd.read_parquet(data_dir / "labels" / "tsmc_grid" / f"{day}.parquet", columns=["tau", "S_mid_tau", f"S_mid_{horizon}"])
         d = f.merge(g, on="tau", how="inner")
