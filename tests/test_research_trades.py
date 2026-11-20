@@ -62,12 +62,14 @@ def test_fills_of_one_order_share_the_quote_before_the_first_fill(tmp_path):
                          "2026-03-10 09:20:00.000"])
     pd.DataFrame({"warrant_id": "056552", "datetime": ts, "close": [0.82, 0.85, 0.86, 0.84],
                   "volume": [3, 12, 52, 1], "bid_price": [0.80, 0.0, 0.84, 0.83],
-                  "ask_price": [0.85, 0.0, 0.87, 0.85], "tick_type": [1, 1, 1, 2]}).to_parquet(day_dir / "w.parquet")
+                  "ask_price": [0.85, 0.0, 0.87, 0.85], "tick_type": [1, 1, 1, 2],
+                  "bid_volume": [50, 0, 49, 48], "ask_volume": [80, 0, 70, 69]}).to_parquet(day_dir / "w.parquet")
     w = load_warrant_ticks(day_dir).reset_index(drop=True)
     assert w["pre_bid"].tolist()[1:3] == [0.80, 0.80] and w["pre_ask"].tolist()[1:3] == [0.85, 0.85]
     assert w["fill_seq"].tolist() == [0, 0, 1, 0]
     assert w["order_volume"].tolist()[1:3] == [64, 64] and w["n_fills"].tolist()[1:3] == [2, 2]
     assert w["pre_quote_age_s"].tolist()[1:3] == [300.5, 300.5]
+    assert w["pre_ask_volume"].tolist()[1:3] == [80, 80]     # displayed size before the first fill
     assert w.loc[3, "pre_bid"] == 0.84                       # next order sees the last fill's quote
     assert np.isnan(w.loc[0, "pre_bid"])                     # first trade of the day
 
@@ -77,7 +79,8 @@ def test_first_order_of_the_day_does_not_borrow_its_own_fill_quote(tmp_path):
     day_dir.mkdir()
     ts = pd.to_datetime(["2026-03-10 09:10:00", "2026-03-10 09:10:00"])
     pd.DataFrame({"warrant_id": "A", "datetime": ts, "close": [1.0, 1.01], "volume": [1, 1],
-                  "bid_price": [0.99, 1.0], "ask_price": [1.01, 1.02], "tick_type": [1, 1]}).to_parquet(day_dir / "w.parquet")
+                  "bid_price": [0.99, 1.0], "ask_price": [1.01, 1.02], "tick_type": [1, 1],
+                  "bid_volume": 5, "ask_volume": 5}).to_parquet(day_dir / "w.parquet")
     w = load_warrant_ticks(day_dir)
     assert w["pre_bid"].isna().all()
 

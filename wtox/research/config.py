@@ -26,7 +26,7 @@ CONTINUOUS_END = pd.Timedelta(hours=13, minutes=25)   # panel and labels use t <
 
 # Panel columns observed right after the trade (they include the trade's own impact). Kept for
 # diagnostics; never use them as model features (CLAUDE.md §4, §5.4).
-POST_TRADE_COLUMNS = ("post_bid", "post_ask")
+POST_TRADE_COLUMNS = ("post_bid", "post_ask", "post_bid_volume", "post_ask_volume")
 
 # --- markout horizons (CLAUDE.md §3.1) ------------------------------------------------------
 # "close" = last continuous-session underlying mid (before 13:25). A horizon that runs past the
@@ -59,4 +59,30 @@ BROKERAGE_FEE_MAX = 0.001425         # 手續費 statutory cap, both sides, befo
 SINGLE_STOCK_FUTURES_TAX = 0.00002   # 期交稅 on stock futures, both sides
 
 # --- backup sample rules (CLAUDE.md §2, only if coverage fails the §10 standard) -------------
-CONSISTENT_POOL_MIN_DAYS_TO_EXPIRY = None   # re-derived after the backfill coverage check
+# DTE buckets (DTE_BUCKET_LABELS) kept in BOTH periods: a bucket with any failing cell in either the
+# training or the test period is dropped from both (CLAUDE.md §2 處理規則 3). None = not needed / not decided.
+CONSISTENT_POOL_DTE_BUCKETS = None
+
+# --- stage 2 validation (CLAUDE.md §5.1) ----------------------------------------------------
+# Coverage = Shioaji whole-day tick volume / TEJ daily volume, per month x days-to-expiry bucket.
+# Bucket edges are days to expiry: coverage uses TEJ days_to_expiry (剩餘期間, the only DTE TEJ-only
+# warrant-days have); quotes uses calendar days from the point-in-time terms. They can differ
+# (CLAUDE.md §2 expiry_conflict), so compare the two tables by bucket with that in mind.
+# A "≤0" bucket keeps expiry-day rows (or a DTE source that disagrees) from silently dropping out.
+DTE_BUCKET_EDGES = (float("-inf"), 0, 30, 90, 180, float("inf"))
+DTE_BUCKET_LABELS = ("≤0", "1–30", "31–90", "91–180", ">180")
+# Pass/fail standard: must be written into CLAUDE.md §10 BEFORE coverage results are seen (⭐ §2).
+# None = not decided yet; coverage.passes() refuses to run until both are set.
+COVERAGE_MIN_CELL = 0.90             # per month x DTE bucket (set 2026-11-20, before any coverage result)
+COVERAGE_MIN_MONTH = 0.95            # per month, all buckets together
+
+# Clock alignment: event series on a fixed grid, cross-correlated at lags of +-CLOCK_MAX_LAG grid steps.
+CLOCK_GRID = pd.Timedelta(milliseconds=100)
+CLOCK_MAX_LAG = 50                   # 50 x 100 ms = +-5 s
+
+# Same-side IV change (issuer re-marking vol): pairs of consecutive same-side trades in one warrant
+# at most this far apart; farther pairs are dropped (vol moves for other reasons over long gaps).
+IV_PAIR_MAX_GAP = pd.Timedelta(minutes=30)
+
+# Dividends (FinMind TaiwanStockDividend), stored at <data>/finmind/dividends_2330.parquet.
+DIVIDEND_FILE = "finmind/dividends_2330.parquet"

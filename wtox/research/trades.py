@@ -19,7 +19,8 @@ closing call auction and is excluded), with:
   underlying shares: share_equiv = side * volume * 1000 * ratio * delta (1 lot = 1,000 warrants).
 * effective leverage G = |delta| * ratio * S_mid / pre_mid (known at trade time, a feature).
 * trade_id: row number within the day, the join key for labels (wtox.research.markout).
-* post_bid / post_ask: the quote right *after* this trade. It already reflects this trade's impact,
+* pre_bid_volume / pre_ask_volume: displayed size at the pre-trade quote (lots).
+* post_bid / post_ask (+ _volume): the quote right *after* this trade. It already reflects this trade's impact,
   so it is kept for diagnostics only and must never be a model feature (config.POST_TRADE_COLUMNS).
 
 Everything here is known at trade time. Future information belongs in labels only (CLAUDE.md §4).
@@ -68,6 +69,7 @@ def load_warrant_ticks(day_dir):
     # all fills sharing a timestamp take the quote before the first of them
     g = w.groupby("warrant_id", sort=False)
     prev = pd.DataFrame({"pre_bid": g["bid_price"].shift(1), "pre_ask": g["ask_price"].shift(1),
+                         "pre_bid_volume": g["bid_volume"].shift(1), "pre_ask_volume": g["ask_volume"].shift(1),
                          "pre_time": g["datetime"].shift(1)})
     order = w.groupby(["warrant_id", "datetime"], sort=False)
     w["fill_seq"] = order.cumcount()
@@ -127,11 +129,13 @@ def build_day(day, data_dir, terms, div_dates=(), r=config.RISK_FREE, q=config.D
     w["share_equiv"] = w["signed_volume"] * UNITS_PER_LOT * w["ratio"] * w["delta"]
     w["notional"] = w["close"] * w["volume"] * UNITS_PER_LOT
     w["post_bid"], w["post_ask"] = w["bid_price"], w["ask_price"]
+    w["post_bid_volume"], w["post_ask_volume"] = w["bid_volume"], w["ask_volume"]
     w["leverage"] = w["delta"].abs() * w["ratio"] * w["S_mid"] / w["pre_mid"]
 
     cols = ["datetime", "warrant_id", "tej_id", "issuer", "kind", "strike", "ratio", "T", "close", "volume",
             "fill_seq", "n_fills", "order_volume", "tick_type", "side",
-            "pre_bid", "pre_ask", "pre_mid", "pre_spread_pct", "pre_quote_age_s", "post_bid", "post_ask",
+            "pre_bid", "pre_ask", "pre_bid_volume", "pre_ask_volume", "pre_mid", "pre_spread_pct", "pre_quote_age_s",
+            "post_bid", "post_ask", "post_bid_volume", "post_ask_volume",
             "S", "S_mid", "S_mid_is_trade", "moneyness", "iv", "delta", "leverage", "signed_volume", "share_equiv",
             "notional", "terms_source", "terms_stale", "expiry_conflict"]
     w = w[cols].sort_values(["datetime", "warrant_id"], kind="mergesort").reset_index(drop=True)
