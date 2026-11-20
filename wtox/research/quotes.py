@@ -1,21 +1,23 @@
-"""Missing pre-trade quotes (CLAUDE.md §2 已知缺口「成交前報價缺失」, stage 2).
+"""At-trade quotes (CLAUDE.md §2 已知缺口「成交前報價缺失」, §10 rule A'', stage 2).
 
-A trade has no ``pre_mid`` when it is the warrant's first trade of the day or the previous tick's
-quote was not two-sided. Dropping those trades would select on liquidity, so this module
+The panel's ``pre_bid`` / ``pre_ask`` follow rule A'' (wtox.research.trades): touched side = the
+order's first fill price, other side from the post-trade book or the previous quote. This module
+reports how often that quote exists and checks the rule:
 
-1. ``classify``: labels each trade's reason (ok / first_of_day / one_sided / empty / crossed);
-2. ``summary``: counts and volume shares by reason within groups (liquidity, DTE, side, ...);
-3. ``post_as_pre``: tests whether the quote right after an order can stand in for the quote before
-   it. Issuers post large size, so a retail order usually leaves the touched level in place
-   (``level_survived``: for a buy the post-trade ask still equals the fill price, for a sell the
-   post-trade bid). On trades that HAVE both quotes, compare post vs pre mid, split by
-   level_survived and by whether the order was at least the displayed size (``ate_level``). The
-   same level_survived flag is observable on trades WITHOUT a pre quote, which is what makes a
-   rule usable there.
+1. ``classify`` / ``summary``: why a trade has no at-trade quote (no_side / first_of_day /
+   prev_stale / other_side_invalid), by liquidity, DTE, month, side;
+2. ``other_side_agreement``: where both the post-trade and the still-valid previous quote give
+   the other side, how often they agree;
+3. ``reaction_test``: single-fill orders with a previous quote <= 1 s old whose touched level is
+   unchanged before and after. If the issuer reacted to the trade within the same print, the
+   post-trade other side would move, and in the trade's direction;
+4. ``sweep_check``: invariants (by construction the first fill pays exactly the quoted half spread,
+   so this catches fill-ordering errors only; also: under A'' a wrong exchange flag can no longer
+   show up as a negative effective spread). Every fill's half-spread paid s*(P_i - pre_mid) is >= the quoted
+   half spread s*(P1 - pre_mid); a strict > holds only for fills at a worse price than P1 (one
+   order can take several resting orders at the same price, so "multi-fill" alone does not imply >).
 
-Uses the order's last fill for the post quote (intermediate fills of a multi-level order carry 0/0).
 post_* columns are diagnostics only and must not become features (config.POST_TRADE_COLUMNS).
-The substitution rule itself is decided after these numbers and written into CLAUDE.md §10.
 
     python -m wtox.research.quotes --data ../data
 """
@@ -28,21 +30,18 @@ import pandas as pd
 
 from wtox.research import config
 from wtox.research.coverage import dte_bucket
-from wtox.research.trades import quote_mid
 
-REASONS = ("ok", "first_of_day", "one_sided", "empty", "crossed")
+REASONS = ("ok", "no_side", "first_of_day", "prev_stale", "other_side_invalid")
 LIQUIDITY_EDGES = (0, 1, 5, 20, np.inf)
 LIQUIDITY_LABELS = ("1", "2–5", "6–20", ">20")
 
 
 def classify(panel):
-    """Panel plus ``missing_reason``, ``first_order``, ``trades_that_day`` and grouping columns."""
+    """Panel plus ``missing_reason``, ``orders_that_day`` and grouping columns."""
     p = panel.copy()
-    bid, ask = p["pre_bid"].fillna(0), p["pre_ask"].fillna(0)
-    no_prev = p["pre_quote_age_s"].isna()
     reason = np.select(
-        [p["pre_mid"].notna(), no_prev, (bid > 0) ^ (ask > 0), (bid <= 0) & (ask <= 0)],
-        ["ok", "first_of_day", "one_sided", "empty"], "crossed")
+        [p["pre_mid"].notna(), ~p["order_tick_type"].isin([1, 2]), p["prev_quote_age_s"].isna(), ~p["prev_in_force"]],
+        ["ok", "no_side", "first_of_day", "prev_stale"], "other_side_invalid")
     p["missing_reason"] = pd.Categorical(reason, categories=REASONS)
     orders = p[p["fill_seq"] == 0].groupby("warrant_id").size()
     p["orders_that_day"] = p["warrant_id"].map(orders).fillna(0).astype("int64")
@@ -62,62 +61,102 @@ def summary(classified, by=()):
     return out
 
 
-def post_as_pre(panel):
-    """One row per order (its last fill): pre and post mids, level_survived, ate_level, diff in bps."""
-    last = panel[panel["fill_seq"] == panel["n_fills"] - 1].copy()
-    last["post_mid"] = quote_mid(last["post_bid"], last["post_ask"])
-    buy, sell = last["side"] == 1, last["side"] == -1
-    last["level_survived"] = (buy & np.isclose(last["post_ask"], last["close"])) | \
-                             (sell & np.isclose(last["post_bid"], last["close"]))
-    depth = np.where(buy, last["pre_ask_volume"], np.where(sell, last["pre_bid_volume"], np.nan))
-    last["ate_level"] = pd.Series(last["order_volume"].to_numpy() >= depth, index=last.index).where(~np.isnan(depth))
-    last["mid_diff_bps"] = (last["post_mid"] - last["pre_mid"]) / last["pre_mid"] * 1e4
-    return last[["datetime", "warrant_id", "side", "close", "order_volume", "pre_mid", "post_mid",
-                 "level_survived", "ate_level", "mid_diff_bps"]].reset_index(drop=True)
+def _orders(panel):
+    """One row per order: first-fill columns plus the last fill's post-trade quote."""
+    first = panel[panel["fill_seq"] == 0].drop(columns=["post_bid", "post_ask"])
+    last = panel.loc[panel["fill_seq"] == panel["n_fills"] - 1, ["datetime", "warrant_id", "post_bid", "post_ask"]]
+    return first.merge(last, on=["datetime", "warrant_id"], how="left")
 
 
-def post_as_pre_summary(orders):
-    """On orders with both mids: how often post == pre, by level_survived x ate_level."""
-    both = orders[orders["pre_mid"].notna() & orders["post_mid"].notna() & (orders["side"] != 0)]
-    g = both.groupby(["level_survived", both["ate_level"].astype("boolean")], dropna=False)
-    return pd.DataFrame({
-        "n": g.size(),
-        "share_equal": g["mid_diff_bps"].agg(lambda s: float(np.mean(np.abs(s) < 1e-6))),
-        "median_abs_bps": g["mid_diff_bps"].agg(lambda s: float(np.median(np.abs(s)))),
-        "p95_abs_bps": g["mid_diff_bps"].agg(lambda s: float(np.quantile(np.abs(s), 0.95))),
-    }).reset_index()
+def other_side_agreement(panel):
+    """Orders where both sources give the other side: share where post-trade == previous quote."""
+    o = _orders(panel)
+    buy, p1 = o["order_tick_type"] == 1, o["first_fill_price"]
+    post_o, prev_o = np.where(buy, o["post_bid"], o["post_ask"]), np.where(buy, o["prev_bid"], o["prev_ask"])
+    prev_t = np.where(buy, o["prev_ask"], o["prev_bid"])
+    with np.errstate(invalid="ignore"):
+        inside = lambda x: np.where(buy, (x > 0) & (x < p1), (x > 0) & (x > p1))
+        both = o["order_tick_type"].isin([1, 2]) & inside(post_o) & inside(prev_o) & np.isclose(prev_t, p1)
+    return pd.Series({"n": int(both.sum()), "share_equal": float(np.isclose(post_o[both], prev_o[both]).mean())
+                      if both.any() else np.nan})
 
 
-def run(data_dir, out_dir, panel_dir=None):
+def reaction_test(panel, max_age_s=1.0):
+    """Single-fill orders, previous quote <= max_age_s old, touched level equal before/after the fill,
+    and 2330's mid unchanged since the previous order in the warrant (so a re-quote on a stock move
+    is not read as a reaction to the print). One row per order: did the other side move, toward /
+    against the trade's direction."""
+    o = _orders(panel).sort_values(["warrant_id", "datetime"], kind="mergesort")
+    o["prev_S_mid"] = o.groupby("warrant_id")["S_mid"].shift(1)
+    o = o[(o["n_fills"] == 1) & (o["prev_quote_age_s"] <= max_age_s) & o["order_tick_type"].isin([1, 2])
+          & np.isclose(o["S_mid"], o["prev_S_mid"])]
+    buy = o["order_tick_type"] == 1
+    p1 = o["first_fill_price"]
+    keep = np.where(buy, np.isclose(o["prev_ask"], p1) & np.isclose(o["post_ask"], p1),
+                    np.isclose(o["prev_bid"], p1) & np.isclose(o["post_bid"], p1))
+    other_ok = np.where(buy, (o["prev_bid"] > 0) & (o["post_bid"] > 0), (o["prev_ask"] > 0) & (o["post_ask"] > 0))
+    o, buy = o[keep & other_ok], buy[keep & other_ok]
+    move = np.where(buy, o["post_bid"] - o["prev_bid"], o["prev_ask"] - o["post_ask"])  # > 0: toward the trade
+    moved = ~np.isclose(move, 0)
+    return pd.DataFrame({"side": np.where(buy, "buy", "sell"), "moved": moved, "toward": moved & (move > 0),
+                         "against": moved & (move < 0)})
+
+
+def reaction_summary(flags):
+    g = flags.groupby("side")
+    return pd.concat([g.size().rename("n"), g[["moved", "toward", "against"]].mean()], axis=1).reset_index()
+
+
+def sweep_check(panel, tol=1e-9):
+    """Invariant counts on fills with an at-trade quote: paid half-spread vs quoted half-spread."""
+    p = panel[panel["pre_mid"].notna() & panel["order_tick_type"].isin([1, 2])]
+    s = np.where(p["order_tick_type"] == 1, 1, -1)
+    paid = s * (p["close"] - p["pre_mid"])
+    quoted = s * (p["first_fill_price"] - p["pre_mid"])
+    worse = s * (p["close"] - p["first_fill_price"]) > tol
+    return pd.Series({"n_fills": len(p), "n_below_quoted": int((paid < quoted - tol).sum()),
+                      "n_worse_price": int(worse.sum()), "n_worse_not_above": int((worse & (paid <= quoted + tol)).sum()),
+                      "n_quoted_nonpositive": int((quoted <= tol).sum())})
+
+
+def run(data_dir, out_dir, panel_dir=None, days=None):
+    """``days`` limits the run (the substitution rule was decided on training days only)."""
     data_dir, out_dir = Path(data_dir), Path(out_dir)
     panel_dir = Path(panel_dir or data_dir / "panel" / "tsmc_warrant_trades")
-    cls, orders = [], []
+    cls, agree, react, sweep = [], [], [], []
     for path in sorted(panel_dir.glob("*.parquet")):
-        if not config.in_sample(path.stem):
+        if not config.in_sample(path.stem) or (days is not None and path.stem not in days):
             continue
         p = pd.read_parquet(path)
         c = classify(p)
-        cls.append(c[["datetime", "warrant_id", "volume", "side", "missing_reason", "liquidity", "dte_bucket",
-                      "kind"]].assign(day=path.stem))
-        o = post_as_pre(p).merge(c.loc[c["fill_seq"] == c["n_fills"] - 1, ["datetime", "warrant_id", "missing_reason"]]
-                                 .drop_duplicates(["datetime", "warrant_id"]), on=["datetime", "warrant_id"], how="left")
-        orders.append(o.assign(day=path.stem))
+        cls.append(c[["datetime", "warrant_id", "volume", "order_volume", "side", "missing_reason", "liquidity",
+                      "dte_bucket", "kind", "pre_quote_source"]].assign(day=path.stem))
+        agree.append(other_side_agreement(p).rename(path.stem))
+        react.append(reaction_test(p))
+        sweep.append(sweep_check(p).rename(path.stem))
     out_dir.mkdir(parents=True, exist_ok=True)
     cls = pd.concat(cls, ignore_index=True)
-    orders = pd.concat(orders, ignore_index=True)
     cls["month"] = cls["datetime"].dt.to_period("M").astype(str)
-    tables = {by: summary(cls, by) for by in [(), ("month",), ("liquidity",), ("dte_bucket",), ("side",), ("kind",)]}
+    cls["size"] = pd.cut(cls["order_volume"], [0, 10, 50, 100, 500, np.inf], labels=["1–10", "11–50", "51–100",
+                                                                                     "101–500", ">500"])
+    tables = {by: summary(cls, by) for by in [(), ("month",), ("liquidity",), ("dte_bucket",), ("side",), ("kind",),
+                                              ("size",)]}
     for by, t in tables.items():
         t.to_parquet(out_dir / f"premid_missing_{'_'.join(by) or 'all'}.parquet", index=False)
-    post_as_pre_summary(orders).to_parquet(out_dir / "premid_post_as_pre.parquet", index=False)
-    miss = orders[(orders["missing_reason"] != "ok") & (orders["side"] != 0)]   # side 0 can never "survive"
-    miss.groupby("missing_reason", observed=True)["level_survived"].mean().rename("share_level_survived") \
-        .reset_index().to_parquet(out_dir / "premid_missing_level_survived.parquet", index=False)
-    return tables, orders
+    a = pd.DataFrame(agree)
+    checks = {
+        "other_side_agreement": pd.DataFrame({"n": [a["n"].sum()],
+                                              "share_equal": [(a["n"] * a["share_equal"].fillna(0)).sum() / a["n"].sum()]}),
+        "reaction_test": reaction_summary(pd.concat(react, ignore_index=True)),
+        "sweep_check": pd.DataFrame(sweep).sum().to_frame().T,
+    }
+    for k, v in checks.items():
+        v.to_parquet(out_dir / f"premid_{k}.parquet", index=False)
+    return tables, checks
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(description="Missing pre-trade quotes: rates and the post-trade substitute test")
+    p = argparse.ArgumentParser(description="At-trade quote coverage and rule checks")
     p.add_argument("--data", default="../data")
     p.add_argument("--out", default=None, help="default: <data>/results/validation")
     a = p.parse_args(argv)

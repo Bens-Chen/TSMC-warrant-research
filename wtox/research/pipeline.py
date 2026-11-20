@@ -21,6 +21,8 @@ def run(data, steps=STEPS, rebuild=False):
     flag = ["--rebuild"] if rebuild else []
     for step in steps:
         print(f"== {step}")
+        if step not in ("panel", "clock"):
+            trades.check_schema(panel_dir)
         if step == "panel":
             trades.main(["--data", str(data), "--out", str(panel_dir), *flag])
         elif step == "labels":

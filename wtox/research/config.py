@@ -58,6 +58,23 @@ STOCK_TRANSACTION_TAX = 0.003        # 證交稅, stock sell side only
 BROKERAGE_FEE_MAX = 0.001425         # 手續費 statutory cap, both sides, before discount
 SINGLE_STOCK_FUTURES_TAX = 0.00002   # 期交稅 on stock futures, both sides
 
+# --- H4: warrant flow predicts 2330 (CLAUDE.md §3.7); main settings pre-registered 2026-11-20 --------
+H4_GRID = pd.Timedelta(minutes=1)            # τ grid spacing
+H4_FLOW_WINDOW = pd.Timedelta(minutes=5)     # k: flow summed over [τ - k, τ)
+H4_MAIN_HORIZON = "5m"                       # main target: 2330 mid-to-mid return [τ, τ + h]
+H4_EXPLORATORY_HORIZONS = ("1m", "30m", "close")   # BH-FDR, labelled exploratory
+H4_FIRST_TAU = pd.Timedelta(hours=9, minutes=5)    # first full flow window ends 09:05
+H4_LAST_TAU = pd.Timedelta(hours=13, minutes=20)   # last τ for any h (close too); also τ + h <= 13:25
+H4_NORM_LOOKBACK_DAYS = 20                   # denominator: mean 2330 shares traded in the same 5-min
+                                             # time-of-day window over the previous 20 trading days
+H4_TOD_DUMMY = pd.Timedelta(minutes=30)      # time-of-day dummies
+H4_SIGNAL = "residual"                       # stage 5 signal: flow minus its training-fitted projection on
+                                             # the controls; "raw" normalised flow reported for comparison
+H4_THRESHOLD_QUANTILE = 0.05                 # static training-period top / bottom 5%
+H4_OVERLAP = "parallel"                      # each triggered τ opens a 1/5 position held 5 min
+H4_INSTRUMENT = "stock_futures"              # main: 2330 stock futures; stock (day-trade tax) as reference
+STOCK_DAYTRADE_TAX = 0.0015                  # 現股當沖賣出證交稅 (reduced rate), reference only
+
 # --- backup sample rules (CLAUDE.md §2, only if coverage fails the §10 standard) -------------
 # DTE buckets (DTE_BUCKET_LABELS) kept in BOTH periods: a bucket with any failing cell in either the
 # training or the test period is dropped from both (CLAUDE.md §2 處理規則 3). None = not needed / not decided.
@@ -79,6 +96,9 @@ COVERAGE_MIN_MONTH = 0.95            # per month, all buckets together
 # Clock alignment: event series on a fixed grid, cross-correlated at lags of +-CLOCK_MAX_LAG grid steps.
 CLOCK_GRID = pd.Timedelta(milliseconds=100)
 CLOCK_MAX_LAG = 50                   # 50 x 100 ms = +-5 s
+# Fine pass (decides whether the 1s/5s windows stay, CLAUDE.md §10): 10 ms grid, +-0.5 s.
+CLOCK_FINE_GRID = pd.Timedelta(milliseconds=10)
+CLOCK_FINE_MAX_LAG = 50
 
 # Same-side IV change (issuer re-marking vol): pairs of consecutive same-side trades in one warrant
 # at most this far apart; farther pairs are dropped (vol moves for other reasons over long gaps).

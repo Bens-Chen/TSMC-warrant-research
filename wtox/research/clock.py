@@ -99,10 +99,20 @@ def peak(ll):
     return float(ll.loc[ll["corr"].idxmax(), "lag_s"]) if len(ll) else np.nan
 
 
+def summarize(ll):
+    """Per-day peaks and the lag profile pooled over days (mean corr per lag), as reported in §10."""
+    ll = ll.dropna(subset=["corr"]).assign(lag_ms=lambda d: (d["lag_s"] * 1000).round().astype(int))
+    peaks = ll.loc[ll.groupby("day")["corr"].idxmax(), ["day", "lag_ms"]]
+    pooled = ll.groupby("lag_ms")["corr"].mean()
+    return pd.Series({"n_days": peaks["day"].nunique(), "median_peak_ms": float(peaks["lag_ms"].median()),
+                      "n_negative_peak_days": int((peaks["lag_ms"] < 0).sum()),
+                      "pooled_peak_ms": int(pooled.idxmax())})
+
+
 def run(data_dir, out_dir, days):
     data_dir, out_dir = Path(data_dir), Path(out_dir)
     terms, div_dates = terms_mod.load(data_dir, config.UNDERLYING)
-    res, lls = [], []
+    res, lls, fine = [], [], []
     for day in days:
         spath = data_dir / "shioaji" / "underlying_ticks" / "stock" / config.UNDERLYING / f"{day}.parquet"
         files = sorted((data_dir / "shioaji" / "ticks" / day).glob("*.parquet"))
@@ -114,11 +124,19 @@ def run(data_dir, out_dir, days):
                 {"day": day, "feed": "warrant", **resolution(continuous_session(warrants)["datetime"])}]
         kinds = terms_mod.terms_on(terms, day, div_dates).set_index("warrant_id")["kind"]
         lls.append(lead_lag(stock, warrants, kinds).assign(day=day))
+        fine.append(lead_lag(stock, warrants, kinds, config.CLOCK_FINE_GRID, config.CLOCK_FINE_MAX_LAG).assign(day=day))
     out_dir.mkdir(parents=True, exist_ok=True)
     res = pd.DataFrame(res)
     ll = pd.concat(lls, ignore_index=True) if lls else pd.DataFrame()
     res.to_parquet(out_dir / "clock_resolution.parquet", index=False)
     ll.to_parquet(out_dir / "clock_lead_lag.parquet", index=False)
+    summaries = {"100ms": summarize(ll)} if len(ll) else {}
+    if fine:
+        fine = pd.concat(fine, ignore_index=True)
+        fine.to_parquet(out_dir / "clock_lead_lag_fine.parquet", index=False)
+        summaries["10ms"] = summarize(fine)
+    if summaries:
+        pd.DataFrame(summaries).T.rename_axis("grid").reset_index().to_parquet(out_dir / "clock_summary.parquet", index=False)
     return res, ll
 
 
