@@ -114,7 +114,7 @@ H4_TAIL_EDGES = (0.0, 0.05, 0.50, 0.95, 1.0) # residual-flow quantile groups
 H4_SHORT_DTE_DAYS = 90                       # flow split: <= 90 days to expiry vs longer
 
 # --- stage 5 pre-registration (CLAUDE.md §10, 2026-11-21, before any 2026 data is read) -----------
-TEST_UNLOCKED = False                        # reading any day >= TEST_START raises until this is True (one run)
+TEST_UNLOCKED = True                         # reading any day >= TEST_START raises until this is True (one run)
 DRY_RUN_SPLIT = "2025-06-30"                 # pipeline check before unlocking: fit <= this, "test" on the rest of 2025
 SCORE_TARGET = f"M_dt_{MAIN_HORIZON}"
 SCORE_AGE_CLIP_S = 16200                     # prev_quote_age_s clipped to one session (4.5 h), then log1p
