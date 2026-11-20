@@ -136,3 +136,25 @@ def test_sweep_fills_share_the_quote_met_by_the_first_fill(tmp_path):
     assert sweep["pre_ask"].tolist() == [1.00, 1.00] and sweep["pre_bid"].tolist() == [0.99, 0.99]
     paid = sweep["close"] - sweep["pre_mid"]
     assert paid.iloc[1] > paid.iloc[0] == pytest.approx(0.005)        # slippage shows on the second level
+
+
+def test_spot_change_before_the_trade_looks_back_only(tmp_path):
+    day, S, K, ratio = "2026-03-10", 2000.0, 2100.0, 0.01
+    wdir = tmp_path / "shioaji" / "ticks" / day
+    wdir.mkdir(parents=True)
+    pd.DataFrame({"warrant_id": "A", "datetime": pd.to_datetime([f"{day} 09:10:00", f"{day} 09:10:10"]),
+                  "close": [1.00, 1.00], "volume": [1, 1], "bid_price": [0.99, 0.99], "ask_price": [1.00, 1.00],
+                  "tick_type": [1, 1], "bid_volume": 5, "ask_volume": 5}).to_parquet(wdir / "A.parquet")
+    sdir = tmp_path / "shioaji" / "underlying_ticks" / "stock" / "2330"
+    sdir.mkdir(parents=True)
+    st = pd.to_datetime([f"{day} 09:00:01.000", f"{day} 09:10:09.500", f"{day} 09:10:10.500"])
+    pd.DataFrame({"datetime": st, "close": [S, S + 5, S + 10], "bid_price": [S - 5, S, S + 5],
+                  "ask_price": [S + 5, S + 10, S + 15]}).to_parquet(sdir / f"{day}.parquet")
+    terms = pd.DataFrame({"warrant_id": ["A"], "event_date": [pd.NaT], "event_seq": [0], "kind": ["call"],
+                          "strike": [K], "ratio": [ratio], "expiry_date": [pd.Timestamp(day) + pd.Timedelta(days=100)],
+                          "issuer": ["x"], "tej_id": ["A"], "listing_date": [pd.Timestamp(day) - pd.Timedelta(days=30)],
+                          "terms_source": ["twse"], "expiry_conflict": [False]})
+    p = build_day(day, tmp_path, terms)
+    assert p["S_chg_1s"].tolist() == [0.0, 5.0]          # 09:10:10 sees the 09:10:09.5 move, not the later tick
+    assert p["S_chg_5s"].tolist() == [0.0, 5.0]
+    assert p["S_spread_bps"].iloc[1] == pytest.approx(10 / (S + 5) * 1e4)

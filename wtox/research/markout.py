@@ -17,6 +17,10 @@ Join labels to the panel on the full KEY (trade_id, datetime, warrant_id), never
 trade_id is a row number and shifts when the panel is rebuilt. A label file older than its panel
 file is rebuilt automatically.
 
+Grid labels (``build_grid_labels``, labels/tsmc_grid/<day>.parquet): on the fixed grid τ =
+09:00, 09:01, ... (config.H4_GRID) before 13:25, the 2330 mid at τ and at τ + h for every horizon
+(capped and flagged like the trade labels). They are the H4 targets and the day de-trending base.
+
 Build every day:  python -m wtox.research.markout --data ../data
 """
 
@@ -73,6 +77,36 @@ def build_labels(panel, stock, warrants, horizons=None):
     return out.reset_index(drop=True)
 
 
+def _stock_mids(stock):
+    s = _session(stock).sort_values("datetime", kind="mergesort")
+    qm = quote_mid(s["bid_price"], s["ask_price"])
+    return pd.DataFrame({"obs_time": s["datetime"].astype("datetime64[ns]"), "mid": qm.fillna(s["close"])})
+
+
+def build_grid_labels(stock, day, horizons=None, grid=None):
+    """2330 mid at each grid point τ and at τ + h (capped at the last continuous tick)."""
+    horizons = config.HORIZONS if horizons is None else horizons
+    grid = config.H4_GRID if grid is None else grid
+    s = _stock_mids(stock)
+    if s.empty:
+        return pd.DataFrame()
+    d = pd.Timestamp(day)
+    tau = pd.date_range(d + config.SESSION_OPEN, d + config.CONTINUOUS_END, freq=grid, inclusive="left")
+    out = pd.DataFrame({"tau": tau.astype("datetime64[ns]")})      # one time unit for the as-of joins
+    last = s["obs_time"].iloc[-1]
+    at = pd.merge_asof(out.rename(columns={"tau": "target"}), s, left_on="target", right_on="obs_time",
+                       direction="backward")
+    out["S_mid_tau"] = at["mid"].to_numpy()
+    for name, h in horizons.items():
+        target = pd.Series(last, index=out.index) if h is None else (out["tau"] + h).clip(upper=last)
+        if h is not None:
+            out[f"trunc_{name}"] = (out["tau"] + h) > last
+        m = pd.merge_asof(pd.DataFrame({"target": target}), s, left_on="target", right_on="obs_time",
+                          direction="backward")
+        out[f"S_mid_{name}"] = m["mid"].to_numpy()
+    return out
+
+
 def build_day(day, data_dir, panel_dir):
     data_dir = Path(data_dir)
     ppath = Path(panel_dir) / f"{day}.parquet"
@@ -99,10 +133,18 @@ def main(argv=None):
     panel_dir = Path(a.panel or data / "panel" / "tsmc_warrant_trades")
     out = Path(a.out or data / "labels" / "tsmc_warrant_trades")
     out.mkdir(parents=True, exist_ok=True)
+    grid_out = out.parent / "tsmc_grid"
+    grid_out.mkdir(parents=True, exist_ok=True)
     for ppath in sorted(panel_dir.glob("*.parquet")):
         day = ppath.stem
         if not config.in_sample(day):
             continue
+        gpath = grid_out / f"{day}.parquet"
+        spath = data / "shioaji" / "underlying_ticks" / "stock" / config.UNDERLYING / f"{day}.parquet"
+        if (a.rebuild or not gpath.exists()) and spath.exists():
+            g = build_grid_labels(pd.read_parquet(spath), day)
+            if len(g):
+                g.to_parquet(gpath, index=False)
         path = out / f"{day}.parquet"
         fresh = path.exists() and path.stat().st_mtime > ppath.stat().st_mtime   # equal mtime -> rebuild
         if fresh and not a.rebuild:

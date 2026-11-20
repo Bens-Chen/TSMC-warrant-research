@@ -58,6 +58,38 @@ STOCK_TRANSACTION_TAX = 0.003        # 證交稅, stock sell side only
 BROKERAGE_FEE_MAX = 0.001425         # 手續費 statutory cap, both sides, before discount
 SINGLE_STOCK_FUTURES_TAX = 0.00002   # 期交稅 on stock futures, both sides
 
+# --- stage 3 pre-registration (CLAUDE.md §10, 2026-11-20, before any stage 3 result) -----------
+STAGE3_DAYS = "train"                        # stage 3 uses 2025 only; 2026 is untouched until stage 5
+MAIN_HORIZON = "5m"                          # H1/H2 tests; other horizons only as markout curves
+WEIGHT = "notional"                          # main aggregation: notional-weighted (= issuer P&L per NTD);
+                                             # equal-weighted is a robustness check
+DELTA_BUCKET_EDGES = (0, 0.2, 0.4, 0.6, float("inf"))     # |delta| per share
+DELTA_BUCKET_LABELS = ("<0.2", "0.2–0.4", "0.4–0.6", ">0.6")
+SIZE_BUCKET_EDGES = (0, 10, 50, 100, float("inf"))        # order_volume, lots
+SIZE_BUCKET_LABELS = ("1–10", "11–50", "51–100", ">100")
+SPOT_MOVE_WINDOW = "1s"                      # main; "5s" robustness (panel S_chg_1s / S_chg_5s)
+SPOT_MOVE_WINDOWS = {"1s": pd.Timedelta(seconds=1), "5s": pd.Timedelta(seconds=5)}
+TOD_EDGES = (pd.Timedelta(hours=9), pd.Timedelta(hours=9, minutes=30), pd.Timedelta(hours=12, minutes=30),
+             pd.Timedelta(hours=13, minutes=25))
+TOD_LABELS = ("09:00–09:30", "09:30–12:30", "12:30–13:25")
+HIGH_GAMMA_CELL = ("0.4–0.6", "1–30")        # pre-specified |delta| x DTE cell; other cross cells exploratory
+DETREND_HORIZONS = ("5m", "30m", "close")    # main de-trended; shorter ones de-trended only as robustness
+
+# Hedge cost c per one-way trade, as a fraction of underlying notional (§3.3). Spot half spread is
+# measured per trade (panel S_spread_bps). Netting scales each trade's cost by |net delta| / gross |delta|
+# within the group: none (every trade hedged alone), warrant_day (each warrant's daily net), issuer_day
+# (the issuer's whole 2330 book for the day). c covers the initial delta hedge only: gamma re-hedging and
+# vega P&L from re-marking IV are NOT included, so short-dated ATM warrants cost more than this.
+HEDGE_SCENARIOS = {
+    "pessimistic": {"instrument": "stock", "tax": STOCK_TRANSACTION_TAX / 2, "fee": BROKERAGE_FEE_MAX,
+                    "netting": "none"},
+    "neutral": {"instrument": "stock", "tax": STOCK_TRANSACTION_TAX / 2, "fee": 0.3 * BROKERAGE_FEE_MAX,
+                "netting": "warrant_day"},
+    "optimistic": {"instrument": "stock_futures", "tax": SINGLE_STOCK_FUTURES_TAX, "fee": 0.0,
+                   "netting": "issuer_day"},
+}
+WARRANT_TAX = 0.001                          # 權證證交稅, sell side (retail view §3.6 b)
+
 # --- H4: warrant flow predicts 2330 (CLAUDE.md §3.7); main settings pre-registered 2026-11-20 --------
 H4_GRID = pd.Timedelta(minutes=1)            # τ grid spacing
 H4_FLOW_WINDOW = pd.Timedelta(minutes=5)     # k: flow summed over [τ - k, τ)

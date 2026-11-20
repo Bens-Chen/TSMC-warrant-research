@@ -29,6 +29,8 @@ closing call auction and is excluded), with:
   volumes stay diagnostics (config.POST_TRADE_COLUMNS).
 * underlying: last 2330 trade and post-trade bid/ask at or before the warrant trade (as-of join).
   ``S_mid_is_trade`` marks rows where the quote was invalid and the last trade price was used.
+  ``S_spread_bps`` is 2330's quoted spread then; ``S_chg_<N>`` = S_mid(t) - S_mid(t - N) for
+  config.SPOT_MOVE_WINDOWS (the "spot just moved" cut, §3.4).
 * terms valid that day (strike, ratio, kind, expiry, issuer), point-in-time, from TWSE + TEJ so
   delisted warrants are kept (see wtox.research.terms).
 * iv from the pre-trade warrant mid, delta from that iv, and the delta-weighted exposure in
@@ -54,16 +56,16 @@ from wtox.research import config
 from wtox.research import terms as terms_mod
 
 OPEN, CLOSE = config.SESSION_OPEN, config.CONTINUOUS_END
-SCHEMA_MARKER = "pre_quote_source"      # panels built before rule A'' lack it and must be rebuilt
+SCHEMA_MARKER = "S_chg_1s"              # panels built before the stage 3 features lack it and must be rebuilt
 
 
 def check_schema(panel_dir):
-    """Raise if any in-sample panel file predates rule A'' (run the panel step with --rebuild)."""
+    """Raise if any in-sample panel file predates the current schema (run the panel step with --rebuild)."""
     import pyarrow.parquet as pq
     old = [p.name for p in Path(panel_dir).glob("*.parquet")
            if config.in_sample(p.stem) and SCHEMA_MARKER not in pq.read_schema(p).names]
     if old:
-        raise RuntimeError(f"{len(old)} panel files predate rule A'' (e.g. {sorted(old)[0]}): rebuild with --rebuild")
+        raise RuntimeError(f"{len(old)} panel files predate the current schema (e.g. {sorted(old)[0]}): rebuild with --rebuild")
 UNITS_PER_LOT = config.UNITS_PER_LOT
 
 
@@ -174,6 +176,13 @@ def build_day(day, data_dir, terms, div_dates=(), r=config.RISK_FREE, q=config.D
     w["S_mid_is_trade"] = S_mid.isna() & w["S"].notna()
     S_mid = S_mid.fillna(w["S"])
     w["S_mid"] = S_mid
+    w["S_spread_bps"] = ((w["S_ask"] - w["S_bid"]) / S_mid * 1e4).where(quote_mid(w["S_bid"], w["S_ask"]).notna())
+    # 2330 mid change over the N seconds before the trade (as-of at t - N; past only, known at t)
+    s_mid = pd.DataFrame({"lag_time": s["datetime"], "S_mid_lag": quote_mid(s["S_bid"], s["S_ask"]).fillna(s["S"])})
+    for name, n in config.SPOT_MOVE_WINDOWS.items():
+        at = pd.DataFrame({"lag_time": w["datetime"] - n, "row": np.arange(len(w))}).sort_values("lag_time", kind="mergesort")
+        lag = pd.merge_asof(at, s_mid, on="lag_time", direction="backward").sort_values("row")
+        w[f"S_chg_{name}"] = S_mid.to_numpy() - lag["S_mid_lag"].to_numpy()
     ok = w["pre_mid"].notna() & (w["T"] > 0) & S_mid.notna()
     iv = np.full(len(w), np.nan)
     if ok.any():
@@ -201,7 +210,7 @@ def build_day(day, data_dir, terms, div_dates=(), r=config.RISK_FREE, q=config.D
             "pre_bid", "pre_ask", "pre_mid", "pre_spread_pct", "pre_quote_source",
             "prev_bid", "prev_ask", "prev_bid_volume", "prev_ask_volume", "prev_quote_age_s", "prev_in_force",
             "post_bid", "post_ask", "post_bid_volume", "post_ask_volume",
-            "S", "S_mid", "S_mid_is_trade", "moneyness", "iv", "delta", "leverage", "signed_volume", "share_equiv",
+            "S", "S_mid", "S_mid_is_trade", "S_spread_bps", *[f"S_chg_{n}" for n in config.SPOT_MOVE_WINDOWS], "moneyness", "iv", "delta", "leverage", "signed_volume", "share_equiv",
             "notional", "terms_source", "terms_stale", "expiry_conflict"]
     w = w[cols].sort_values(["datetime", "warrant_id"], kind="mergesort").reset_index(drop=True)
     w.insert(0, "trade_id", np.arange(len(w), dtype="int64"))

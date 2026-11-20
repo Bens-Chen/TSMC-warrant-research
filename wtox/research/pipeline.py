@@ -1,6 +1,7 @@
 """Rebuild everything in order (CLAUDE.md §4): python -m wtox.research.pipeline --data ../data
 
-Steps: panel -> labels -> stage 2 validation (coverage, missing pre-trade quotes, IV checks, clock).
+Steps: panel -> labels -> stage 2 validation (coverage, missing pre-trade quotes, IV checks, clock)
+-> stage 3 (flow features, toxicity tables, H4 in-sample regressions; training period only).
 Dividends are downloaded separately (network): python -m wtox.research.dividends --data ../data.
 Validation outputs go to <data>/results/validation; the coverage pass/fail gate (coverage.passes)
 is applied by hand only after the standard is written into CLAUDE.md §10.
@@ -9,9 +10,9 @@ is applied by hand only after the standard is written into CLAUDE.md §10.
 import argparse
 from pathlib import Path
 
-from wtox.research import clock, config, coverage, dividends, ivcheck, markout, quotes, trades
+from wtox.research import clock, config, coverage, dividends, flow, ivcheck, markout, quotes, toxicity, trades
 
-STEPS = ("panel", "labels", "coverage", "quotes", "ivcheck", "clock")
+STEPS = ("panel", "labels", "coverage", "quotes", "ivcheck", "clock", "flow", "toxicity", "h4")
 
 
 def run(data, steps=STEPS, rebuild=False):
@@ -39,6 +40,12 @@ def run(data, steps=STEPS, rebuild=False):
         elif step == "clock":
             days = sorted(p.stem for p in panel_dir.glob("*.parquet") if config.in_sample(p.stem))
             clock.run(data, val, days)
+        elif step == "flow":
+            flow.run(data)
+        elif step == "toxicity":
+            toxicity.run(data)
+        elif step == "h4":
+            flow.run_h4(data)
         else:
             raise ValueError(f"unknown step {step!r}; choose from {STEPS}")
 

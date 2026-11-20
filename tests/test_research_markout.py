@@ -99,3 +99,18 @@ def test_label_file_older_than_its_panel_is_rebuilt(tmp_path, monkeypatch):
     calls.clear()
     markout.main(["--data", str(tmp_path), "--panel", str(tmp_path / "panel"), "--out", str(tmp_path / "labels")])
     assert calls == []                                               # now fresh -> skipped
+
+
+def test_grid_labels_mid_at_tau_and_tau_plus_h():
+    from wtox.research.markout import build_grid_labels
+    day = "2025-03-03"
+    t = pd.Timestamp(day) + pd.to_timedelta(["09:00:30", "09:01:30", "09:06:10", "13:24:59"])
+    stock = pd.DataFrame({"datetime": t, "close": [100.0, 101, 102, 103], "bid_price": [99.0, 100, 101, 102],
+                          "ask_price": [101.0, 102, 103, 104]})
+    g = build_grid_labels(stock, day, {"5m": pd.Timedelta(minutes=5), "close": None}).set_index("tau")
+    ts = lambda s: pd.Timestamp(f"{day} {s}")
+    assert np.isnan(g.loc[ts("09:00"), "S_mid_tau"])                 # no tick yet
+    assert g.loc[ts("09:01"), "S_mid_tau"] == 100 and g.loc[ts("09:01"), "S_mid_5m"] == 101   # 09:06 -> 09:01:30 tick
+    assert g.loc[ts("09:02"), "S_mid_5m"] == 102                     # 09:07 -> 09:06:10 tick
+    assert g.loc[ts("13:24"), "trunc_5m"] and g.loc[ts("13:24"), "S_mid_5m"] == 103
+    assert (g["S_mid_close"] == 103).all() and len(g) == 265         # 09:00 ... 13:24
