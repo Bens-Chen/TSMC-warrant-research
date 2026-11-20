@@ -105,7 +105,9 @@ def detrend(d, drift, horizons=None):
 def hedge_costs(d, scenarios=None):
     """cost_<scenario> per trade, as a fraction of warrant notional (c x G x netting factor)."""
     scenarios = config.HEDGE_SCENARIOS if scenarios is None else scenarios
-    half = d["S_spread_bps"].fillna(d["S_spread_bps"].median()) / 2e4
+    # a missing 2330 spread takes that day's median (never a later day's), then the frame median
+    day_med = d["S_spread_bps"].groupby(d["datetime"].dt.normalize()).transform("median")
+    half = d["S_spread_bps"].fillna(day_med).fillna(d["S_spread_bps"].median()) / 2e4
     gross = d["share_equiv"].abs()
     day = d["datetime"].dt.normalize()
     for name, sc in scenarios.items():

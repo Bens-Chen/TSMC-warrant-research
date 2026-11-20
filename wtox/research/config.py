@@ -128,6 +128,7 @@ FUTURES_CONTRACT_SHARES = 2000               # 2330 stock futures: 2,000 shares 
 FUTURES_FEE_PER_CONTRACT = 20.0              # NTD per side (assumption)
 FUTURES_TICKS = ((1000, 5.0), (500, 1.0), (100, 0.5), (50, 0.1), (10, 0.05), (0, 0.01))   # (price floor, tick)
 REPLICATION_ALPHA = 0.05
+WALK_FORWARD = "expanding_monthly"          # secondary result: refit every month on all earlier data (from SAMPLE_START)
 
 # --- H4: warrant flow predicts 2330 (CLAUDE.md §3.7); main settings pre-registered 2026-11-20 --------
 H4_GRID = pd.Timedelta(minutes=1)            # τ grid spacing

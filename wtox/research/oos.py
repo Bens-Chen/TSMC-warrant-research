@@ -198,15 +198,16 @@ def tick(price):
     return out
 
 
-def h4_trading(train_days, test_days, data_dir):
-    tr = flow.h4_frame(train_days, data_dir, config.H4_MAIN_HORIZON)
-    te = flow.h4_frame(test_days, data_dir, config.H4_MAIN_HORIZON)
+COSTS = ("futures_spread", "futures_tick", "stock_daytrade")
+
+
+def h4_triggers(tr, te):
+    """Fit the residual projection and thresholds on ``tr`` (flow frames), trade ``te``: one row per trigger."""
     Xtr = _controls(tr)
     beta = np.linalg.lstsq(Xtr.to_numpy(float), tr["F_norm"].to_numpy(float), rcond=None)[0]
     Xte = _controls(te).reindex(columns=Xtr.columns, fill_value=0.0)
     tr_res = tr["F_norm"] - Xtr.to_numpy(float) @ beta
     te = te.assign(F_resid=te["F_norm"] - Xte.to_numpy(float) @ beta)
-    lo, hi = tr_res.quantile(config.H4_THRESHOLD_QUANTILE), tr_res.quantile(1 - config.H4_THRESHOLD_QUANTILE)
     S = te["S_mid_now"].to_numpy(float)
     tick_bps = tick(S) / S * 1e4
     half = te["S_spread_bps_now"].to_numpy(float) / 2
@@ -217,29 +218,46 @@ def h4_trading(train_days, test_days, data_dir):
         "futures_tick": 2 * (tick_bps + fut_fixed),                   # sensitivity
         "stock_daytrade": 2 * half + config.STOCK_DAYTRADE_TAX * 1e4 + 2 * config.BROKERAGE_FEE_MAX * 1e4,  # reference
     }
-    tr_lo_hi = {"residual": (lo, hi), "raw": (tr["F_norm"].quantile(config.H4_THRESHOLD_QUANTILE),
-                                             tr["F_norm"].quantile(1 - config.H4_THRESHOLD_QUANTILE))}
-    sig_col = {"residual": "F_resid", "raw": "F_norm"}
-    rows, trig = [], []
-    all_days = sorted(te["day"].unique())
-    for sig, (l, h) in tr_lo_hi.items():
-        signal = np.select([te[sig_col[sig]] > h, te[sig_col[sig]] < l], [1.0, -1.0], 0.0)
+    q = config.H4_THRESHOLD_QUANTILE
+    bounds = {"residual": ("F_resid", tr_res.quantile(q), tr_res.quantile(1 - q)),
+              "raw": ("F_norm", tr["F_norm"].quantile(q), tr["F_norm"].quantile(1 - q))}
+    trig = []
+    for sig, (col, lo, hi) in bounds.items():
+        signal = np.select([te[col] > hi, te[col] < lo], [1.0, -1.0], 0.0)
         on = signal != 0
-        t = te.loc[on, ["day", "tau", "y_bps"]].assign(signal=signal[on], gross_bps=signal[on] * te.loc[on, "y_bps"].to_numpy())
+        t = te.loc[on, ["day", "tau", "y_bps"]].assign(signal=signal[on], gross_bps=signal[on] * te.loc[on, "y_bps"].to_numpy(),
+                                                      signal_type=sig, threshold_lo=lo, threshold_hi=hi)
         for name, rt in round_trip.items():
+            t[f"cost_{name}"] = rt[on]
             t[f"net_{name}"] = t["gross_bps"] - rt[on]
-            daily = (t.groupby("day")[f"net_{name}"].sum() / 5).reindex(all_days, fill_value=0.0)   # 1/5 position each
+        trig.append(t)
+    return pd.concat(trig, ignore_index=True)
+
+
+def h4_summary(trig, all_days, n_tau):
+    """Per signal x cost: trade stats and the daily P&L series over ``all_days`` (1/5 position per trigger)."""
+    rows = []
+    for sig in ("residual", "raw"):
+        t = trig[trig["signal_type"] == sig]
+        for name in COSTS:
+            daily = (t.groupby("day")[f"net_{name}"].sum() / 5).reindex(all_days, fill_value=0.0)
             sd = daily.std()
             rows.append({"signal": sig, "cost": name, "main": sig == config.H4_SIGNAL and name == "futures_spread",
-                         "n_trades": int(on.sum()), "trigger_rate": float(on.mean()),
+                         "n_trades": len(t), "trigger_rate": len(t) / n_tau if n_tau else np.nan,
                          "gross_mean_bps": t["gross_bps"].mean(), "net_mean_bps": t[f"net_{name}"].mean(),
-                         "cost_mean_bps": float(rt[on].mean()) if on.any() else np.nan,
+                         "cost_mean_bps": t[f"cost_{name}"].mean(),
                          "daily_mean_bps": daily.mean(), "daily_sd_bps": sd,
                          "sharpe_annual": daily.mean() / sd * np.sqrt(250) if sd > 0 else np.nan,
                          "t_daily": daily.mean() / (sd / np.sqrt(len(daily))) if sd > 0 else np.nan,
-                         "n_days": len(daily), "threshold_lo": l, "threshold_hi": h})
-        trig.append(t.assign(signal_type=sig))
-    return pd.DataFrame(rows), pd.concat(trig, ignore_index=True)
+                         "n_days": len(daily)})
+    return pd.DataFrame(rows)
+
+
+def h4_trading(train_days, test_days, data_dir):
+    tr = flow.h4_frame(train_days, data_dir, config.H4_MAIN_HORIZON)
+    te = flow.h4_frame(test_days, data_dir, config.H4_MAIN_HORIZON)
+    trig = h4_triggers(tr, te)
+    return h4_summary(trig, sorted(te["day"].unique()), len(te)), trig
 
 
 # --- 4. replication --------------------------------------------------------------------------
@@ -276,6 +294,82 @@ def h4_replicate(train_days, test_days, data_dir):
     f = lambda x: x[x["term"] == "F_norm"].rename(columns={"coef": "mean_bps", "se": "se_bps"})[["mean_bps", "se_bps", "p", "n", "n_days"]] \
         .assign(cut="h4", group="all", value="F_norm")
     return replicate(f(a), f(b))
+
+
+# --- walk-forward (secondary) ----------------------------------------------------------------
+
+def _wmean(x, w):
+    x, w = np.asarray(x, float), np.asarray(w, float)
+    ok = ~np.isnan(x)
+    return float((x[ok] * w[ok]).sum() / w[ok].sum()) if ok.any() and w[ok].sum() > 0 else np.nan
+
+
+def walk_forward(trades, flows, drifts, base_days, test_days):
+    """Expanding window, monthly refit (CLAUDE.md §10). ``trades``: usable trades of all days (train and
+    test, with cells); ``flows``: H4 frames of all days; ``drifts``: day drift table of all days."""
+    tday = trades["datetime"].dt.strftime("%Y-%m-%d")
+    months = sorted({d[:7] for d in test_days})
+    tr_base = heat_cells(trades[tday.isin(base_days)])
+    cnt = tr_base.groupby(CELL, observed=True).agg(n=("ES", "size"), days=("datetime", lambda x: x.dt.normalize().nunique()))
+    keep = cnt[(cnt["n"] >= config.HEATMAP_MIN_TRADES) & (cnt["days"] >= config.HEATMAP_MIN_DAYS)].index
+    scored, heat_rows, heat_trades, trig = [], [], [], []
+    for m in months:
+        start = f"{m}-01"
+        train_m = trades[tday < start]
+        test_m = trades[tday.str[:7] == m]
+        assert train_m["datetime"].max() < pd.Timestamp(start), "walk-forward leak: training data reaches the test month"
+        if test_m.empty:
+            continue
+        train_days_m = sorted(tday[tday < start].unique())
+        st = fit_stats(train_m, drifts.loc[train_days_m])
+        beta = fit_score(train_m, st)
+        cuts = np.quantile(predict(train_m, st, beta), np.linspace(0, 1, config.SCORE_QUANTILES + 1))
+        cuts[0], cuts[-1] = -np.inf, np.inf
+        p = predict(test_m, st, beta)
+        scored.append(test_m.assign(score=p, month=m, quintile=pd.cut(p, cuts, labels=[f"Q{i}" for i in range(1, config.SCORE_QUANTILES + 1)])))
+        # heatmap: break-even from the expanding window, on the training-fixed cell list
+        h_tr, h_te = heat_cells(train_m), heat_cells(test_m)
+        g = h_tr.groupby(CELL, observed=True)
+        be = (g.apply(lambda x: _wmean(x[TARGET], x["weight"])) + g.apply(lambda x: _wmean(x["cost_neutral"], x["weight"])))
+        pred = g.apply(lambda x: _wmean(x["gap_neutral"], x["weight"]))      # same definition as the static heatmap
+        cells = pd.DataFrame({"be": be, "pred_gap": pred}).loc[lambda x: x.index.isin(keep)]
+        h_te = h_te.join(cells, on=CELL, how="inner")
+        h_te["gap_vs_be"] = h_te["ES"] - h_te["be"]
+        neg = h_te[h_te["pred_gap"] < 0]
+        heat_rows.append({"month": m, "n_negative_cells": int((cells["pred_gap"] < 0).sum()), "n_trades_negative": len(neg),
+                          "realized_gap_bps": _wmean(neg["gap_neutral"], neg["weight"]) * 1e4,
+                          "gap_vs_be_bps": _wmean(neg["gap_vs_be"], neg["weight"]) * 1e4,
+                          "realized_gap_twd": float((neg["gap_neutral"] * neg["notional"]).sum()) if len(neg) else np.nan,
+                          "notional_negative": float(neg["notional"].sum()),
+                          "n_days": int(neg["datetime"].dt.normalize().nunique())})
+        heat_trades.append(h_te[KEY_COLS + CELL + ["weight", "be", "pred_gap", "gap_neutral", "gap_vs_be", "notional"]].assign(month=m))
+        # H4: projection and thresholds from the expanding window
+        fd = flows["day"].astype(str)
+        assert fd[fd < start].max() < start
+        trig.append(h4_triggers(flows[fd < start], flows[fd.str[:7] == m]).assign(month=m))
+    out = {}
+    sc = pd.concat(scored, ignore_index=True)
+    out["wf_quintiles"] = toxicity.table(sc, [TARGET], ["quintile"])
+    q = sc[sc["quintile"].isin(["Q1", f"Q{config.SCORE_QUANTILES}"])]
+    X = pd.DataFrame({"const": 1.0, "top": (q["quintile"] == f"Q{config.SCORE_QUANTILES}").astype(float)}, index=q.index)
+    out["wf_q5_minus_q1"] = robustness.wls_cluster(q[TARGET] * 1e4, X, q["weight"], q["datetime"].dt.normalize()).query("term == 'top'")
+    out["wf_q5_minus_q1_monthly"] = toxicity.table(sc, [TARGET], ["month", "quintile"]).query("quintile in ['Q1', 'Q5']")
+    out["wf_heatmap_monthly"] = pd.DataFrame(heat_rows)
+    ht = pd.concat(heat_trades, ignore_index=True)
+    per = ht.groupby(CELL, observed=True).apply(lambda x: pd.Series({"pred": _wmean(x["pred_gap"], x["weight"]),
+                                                                   "real": _wmean(x["gap_neutral"], x["weight"]),
+                                                                   "n": len(x), "notional": x["notional"].sum()}))
+    out["wf_heatmap_cells"] = per.reset_index().assign(sign_agree=lambda x: np.sign(x["pred"]) == np.sign(x["real"]))
+    trig = pd.concat(trig, ignore_index=True)
+    fd = flows["day"].astype(str)
+    te_flows = flows[fd.isin(test_days)]
+    out["wf_h4_trading"] = h4_summary(trig, sorted(te_flows["day"].unique()), len(te_flows))
+    out["wf_h4_monthly"] = trig.groupby(["signal_type", "month"]).agg(n=("gross_bps", "size"), gross_bps=("gross_bps", "mean"),
+                                                                        net_futures_spread_bps=("net_futures_spread", "mean")).reset_index()
+    out["wf_h4_triggers"] = trig
+    out["wf_predictions"] = sc[KEY_COLS + ["month", "score"]].assign(quintile=sc["quintile"].astype(str), target_bps=sc[TARGET] * 1e4)
+    out["wf_heat_trades"] = ht.assign(**{c: ht[c].astype(str) for c in CELL})
+    return out
 
 
 # --- driver ----------------------------------------------------------------------------------
@@ -343,6 +437,12 @@ def run(data_dir, dry_run=True, out_dir=None):
                                    h4_replicate(train_days, test_days, data_dir)], ignore_index=True))
     for k, v in toxicity.analyse(test).items():          # the full stage 3 tables on the test period
         save(f"test_{k}", v)
+    # walk-forward (secondary): expanding window, monthly refit
+    allt = pd.concat([trm, tem], ignore_index=True)
+    flows = flow.h4_frame(train_days + test_days, data_dir, config.H4_MAIN_HORIZON)
+    drifts_all = robustness.load_drifts(train_days + test_days, data_dir)
+    for k, v in walk_forward(allt, flows, drifts_all, train_days, test_days).items():
+        save(k, v)
     return res
 
 

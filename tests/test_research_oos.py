@@ -90,3 +90,49 @@ def test_replication_rules():
     assert r.loc["x", "sign_and_significance"] == 1 and not r.loc["x", "stable"]   # stronger, but a structural break
     assert np.isnan(r.loc["y", "sign_and_significance"])                           # not significant in training
     assert r.loc["z", "stable"]
+
+
+def _flows(days, seed=0):
+    rng = np.random.default_rng(seed)
+    rows = []
+    for day in days:
+        tau = pd.Timestamp(day) + config.H4_FIRST_TAU + pd.to_timedelta(np.arange(60), unit="min")
+        f = rng.normal(0, 0.02, 60)
+        rows.append(pd.DataFrame({"day": day, "tau": tau, "F_norm": f, "ret_past": rng.normal(0, 1e-3, 60),
+                                  "signed_norm": rng.normal(0, 0.05, 60), "tod": (np.arange(60) // 30),
+                                  "y_bps": 100 * f + rng.normal(0, 1, 60), "S_mid_now": 1500.0, "S_spread_bps_now": 33.3}))
+    return pd.concat(rows, ignore_index=True)
+
+
+def test_walk_forward_expanding_and_no_leak():
+    tr = _d(n=6000, start="2025-01-02")
+    te = _d(n=3000, seed=1, start="2025-07-01")
+    tr = tr[tr["datetime"] < "2025-03-01"]
+    te = te[(te["datetime"] >= "2025-07-01") & (te["datetime"] < "2025-09-01")]
+    allt = pd.concat([tr, te], ignore_index=True).assign(warrant_id="W", trade_id=lambda x: range(len(x)))
+    days = sorted(allt["datetime"].dt.strftime("%Y-%m-%d").unique())
+    base = [d for d in days if d < "2025-03-01"]
+    test_days = [d for d in days if d >= "2025-07-01"]
+    drifts = pd.DataFrame({"1m": 0.0, "5m": 0.0}, index=days)
+    out = oos.walk_forward(allt, _flows(days), drifts, base, test_days)
+    assert set(out["wf_heatmap_monthly"]["month"]) == {"2025-07", "2025-08"}
+    q = out["wf_quintiles"].set_index("quintile")["mean_bps"]
+    assert q["Q5"] > q["Q1"]
+    trig = out["wf_h4_triggers"]
+    assert set(trig["month"]) <= {"2025-07", "2025-08"}
+    assert out["wf_h4_trading"].query("signal == 'residual' and cost == 'futures_spread'")["gross_mean_bps"].iloc[0] > 0
+
+
+def test_walk_forward_trains_only_on_earlier_days(monkeypatch):
+    tr = _d(n=6000, start="2025-01-02")
+    te = _d(n=3000, seed=1, start="2025-07-01")
+    allt = pd.concat([tr[tr["datetime"] < "2025-03-01"],
+                      te[(te["datetime"] >= "2025-07-01") & (te["datetime"] < "2025-09-01")]], ignore_index=True).assign(warrant_id="W", trade_id=lambda x: range(len(x)))
+    days = sorted(allt["datetime"].dt.strftime("%Y-%m-%d").unique())
+    seen = []
+    real = oos.fit_score
+    monkeypatch.setattr(oos, "fit_score", lambda train, st: seen.append(train["datetime"].max()) or real(train, st))
+    oos.walk_forward(allt, _flows(days), pd.DataFrame({"1m": 0.0, "5m": 0.0}, index=days),
+                     [d for d in days if d < "2025-03-01"], [d for d in days if d >= "2025-07-01"])
+    assert seen[0] < pd.Timestamp("2025-07-01") and seen[1] < pd.Timestamp("2025-08-01")
+    assert seen[1] >= pd.Timestamp("2025-07-01")                          # August's window includes July

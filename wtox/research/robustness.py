@@ -267,6 +267,8 @@ def h3_issuers(d):
 # --- driver ----------------------------------------------------------------------------------
 
 def load_drifts(days, data_dir):
+    for x in days:
+        config.check_unlocked(x)
     return pd.DataFrame({x: toxicity.day_drift(pd.read_parquet(Path(data_dir) / "labels" / "tsmc_grid" / f"{x}.parquet"))
                          for x in days}).T
 
