@@ -16,6 +16,7 @@ def test_steps_run_in_order(monkeypatch, tmp_path):
     monkeypatch.setattr(pipeline.flow, "run", lambda d: calls.append(("flow", d)))
     monkeypatch.setattr(pipeline.toxicity, "run", lambda d: calls.append(("toxicity", d)))
     monkeypatch.setattr(pipeline.flow, "run_h4", lambda d: calls.append(("h4", d)))
+    monkeypatch.setattr(pipeline.robustness, "run", lambda d: calls.append(("robustness", d)))
     pipeline.run(tmp_path, rebuild=True)
     assert [c[0] for c in calls] == list(pipeline.STEPS)
     assert "--rebuild" in calls[0][1] and calls[3][1] == tmp_path / "panel" / "tsmc_warrant_trades"

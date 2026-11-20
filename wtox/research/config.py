@@ -90,6 +90,23 @@ HEDGE_SCENARIOS = {
 }
 WARRANT_TAX = 0.001                          # 權證證交稅, sell side (retail view §3.6 b)
 
+# --- stage 4 pre-registration (CLAUDE.md §10, 2026-11-21, before any stage 4 result) -----------
+PLACEBO_PERMUTATIONS = 200                   # within-day shuffles of side
+PLACEBO_SEED = 20261121
+STALE_SPOT_MAX_AGE_S = 0.1                   # "fresh" 2330 quote: last 2330 tick <= 0.1 s before the trade
+PAST_RETURN_WINDOWS = {"1m": pd.Timedelta(minutes=1), "5m": pd.Timedelta(minutes=5)}   # panel S_ret_<w>
+ROBUST_EXCLUDE_TOD = ((pd.Timedelta(hours=9), pd.Timedelta(hours=9, minutes=5)),
+                      (pd.Timedelta(hours=13, minutes=20), pd.Timedelta(hours=13, minutes=25)))
+ROBUST_RISK_FREE = (0.010, 0.020)
+ROBUST_LARGE_ORDER = (50, 100, 200)          # order_volume >= threshold
+ISSUER_LIKE_SIZE_MULTIPLE = 50               # counterparty (i): displayed size a multiple of this
+RETAIL_LIKE_MAX_LOTS = 9                     # counterparty (ii): 1-9 lots and spread < 50% of the warrant-day median
+RETAIL_LIKE_SPREAD_RATIO = 0.5
+ROBUST_MIN_DAY_COVERAGE = 0.95               # only days whose volume coverage >= 95%
+H4_EXTREME_DAY_QUANTILE = 0.99               # drop days above this quantile of |2330 day return| / |flow|
+H4_TAIL_EDGES = (0.0, 0.05, 0.50, 0.95, 1.0) # residual-flow quantile groups
+H4_SHORT_DTE_DAYS = 90                       # flow split: <= 90 days to expiry vs longer
+
 # --- H4: warrant flow predicts 2330 (CLAUDE.md §3.7); main settings pre-registered 2026-11-20 --------
 H4_GRID = pd.Timedelta(minutes=1)            # τ grid spacing
 H4_FLOW_WINDOW = pd.Timedelta(minutes=5)     # k: flow summed over [τ - k, τ)

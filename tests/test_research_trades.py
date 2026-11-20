@@ -158,3 +158,25 @@ def test_spot_change_before_the_trade_looks_back_only(tmp_path):
     assert p["S_chg_1s"].tolist() == [0.0, 5.0]          # 09:10:10 sees the 09:10:09.5 move, not the later tick
     assert p["S_chg_5s"].tolist() == [0.0, 5.0]
     assert p["S_spread_bps"].iloc[1] == pytest.approx(10 / (S + 5) * 1e4)
+
+
+def test_past_return_and_spot_quote_age(tmp_path):
+    day, S, K, ratio = "2026-03-10", 2000.0, 2100.0, 0.01
+    wdir = tmp_path / "shioaji" / "ticks" / day
+    wdir.mkdir(parents=True)
+    pd.DataFrame({"warrant_id": "A", "datetime": pd.to_datetime([f"{day} 09:10:00.000"]), "close": [1.00], "volume": [1],
+                  "bid_price": [0.99], "ask_price": [1.00], "tick_type": [1], "bid_volume": 5,
+                  "ask_volume": 5}).to_parquet(wdir / "A.parquet")
+    sdir = tmp_path / "shioaji" / "underlying_ticks" / "stock" / "2330"
+    sdir.mkdir(parents=True)
+    st = pd.to_datetime([f"{day} 09:04:00.000", f"{day} 09:08:30.000", f"{day} 09:09:59.750", f"{day} 09:10:00.500"])
+    pd.DataFrame({"datetime": st, "close": [S, S, S + 10, S + 50], "bid_price": [S - 5, S + 5, S + 5, S + 45],
+                  "ask_price": [S + 5, S + 15, S + 15, S + 55]}).to_parquet(sdir / f"{day}.parquet")
+    terms = pd.DataFrame({"warrant_id": ["A"], "event_date": [pd.NaT], "event_seq": [0], "kind": ["call"],
+                          "strike": [K], "ratio": [ratio], "expiry_date": [pd.Timestamp(day) + pd.Timedelta(days=100)],
+                          "issuer": ["x"], "tej_id": ["A"], "listing_date": [pd.Timestamp(day) - pd.Timedelta(days=30)],
+                          "terms_source": ["twse"], "expiry_conflict": [False]})
+    r = build_day(day, tmp_path, terms).iloc[0]
+    assert r["S_age_s"] == pytest.approx(0.25)
+    assert r["S_ret_1m"] == pytest.approx((S + 10) / (S + 10) - 1)       # 09:09:00 sees the 09:08:30 quote, mid S+10
+    assert r["S_ret_5m"] == pytest.approx((S + 10) / S - 1)              # 09:05:00 sees the 09:04 quote, mid S

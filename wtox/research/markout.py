@@ -21,6 +21,9 @@ Grid labels (``build_grid_labels``, labels/tsmc_grid/<day>.parquet): on the fixe
 09:00, 09:01, ... (config.H4_GRID) before 13:25, the 2330 mid at τ and at τ + h for every horizon
 (capped and flagged like the trade labels). They are the H4 targets and the day de-trending base.
 
+Placebo labels (``build_placebo_labels``, labels/tsmc_placebo/<day>.parquet, stage 4): a random time
+in the same session per trade and the 2330 mid there and h later.
+
 Build every day:  python -m wtox.research.markout --data ../data
 """
 
@@ -107,6 +110,34 @@ def build_grid_labels(stock, day, horizons=None, grid=None):
     return out
 
 
+def build_placebo_labels(panel, stock, day, horizon=None, seed=None):
+    """Stage 4 placebo: for every panel trade, a random time u in the same day's continuous session
+    (fixed seed per day) and the 2330 mid at u and u + h. The trade's side / warrant are kept."""
+    horizon = config.MAIN_HORIZON if horizon is None else horizon
+    seed = config.PLACEBO_SEED if seed is None else seed
+    out = panel[KEY].copy()
+    s = _stock_mids(stock)
+    if out.empty or s.empty:
+        return pd.DataFrame()
+    d = pd.Timestamp(day)
+    rng = np.random.default_rng([seed, int(d.strftime("%Y%m%d"))])
+    span = (config.CONTINUOUS_END - config.SESSION_OPEN).total_seconds()
+    u = (d + config.SESSION_OPEN + pd.to_timedelta(rng.uniform(0, span, len(out)), unit="s")).astype("datetime64[ns]")
+    out["rand_time"] = u
+    last = s["obs_time"].iloc[-1]
+    h = config.HORIZONS[horizon]
+    for col, target in [("S_mid_rand", pd.Series(u, index=out.index)),
+                        (f"S_mid_rand_{horizon}", pd.Series(u, index=out.index) + h if h is not None else pd.Series(last, index=out.index))]:
+        q = pd.DataFrame({"target": target.clip(upper=last).to_numpy(), "row": np.arange(len(out))}).sort_values("target", kind="mergesort")
+        m = pd.merge_asof(q, s, left_on="target", right_on="obs_time", direction="backward").sort_values("row")
+        out[col] = m["mid"].to_numpy()
+    if h is not None:
+        out[f"trunc_rand_{horizon}"] = (out["rand_time"] + h) > last
+    out[f"hold_rand_{horizon}"] = ((out["rand_time"] + h).clip(upper=last) - out["rand_time"]).dt.total_seconds() \
+        if h is not None else (last - out["rand_time"]).dt.total_seconds()
+    return out.reset_index(drop=True)
+
+
 def build_day(day, data_dir, panel_dir):
     data_dir = Path(data_dir)
     ppath = Path(panel_dir) / f"{day}.parquet"
@@ -135,6 +166,8 @@ def main(argv=None):
     out.mkdir(parents=True, exist_ok=True)
     grid_out = out.parent / "tsmc_grid"
     grid_out.mkdir(parents=True, exist_ok=True)
+    plc_out = out.parent / "tsmc_placebo"
+    plc_out.mkdir(parents=True, exist_ok=True)
     for ppath in sorted(panel_dir.glob("*.parquet")):
         day = ppath.stem
         if not config.in_sample(day):
@@ -145,6 +178,11 @@ def main(argv=None):
             g = build_grid_labels(pd.read_parquet(spath), day)
             if len(g):
                 g.to_parquet(gpath, index=False)
+        ppl = plc_out / f"{day}.parquet"
+        if spath.exists() and (a.rebuild or not ppl.exists() or ppl.stat().st_mtime <= ppath.stat().st_mtime):
+            pl = build_placebo_labels(pd.read_parquet(ppath, columns=KEY), pd.read_parquet(spath), day)
+            if len(pl):
+                pl.to_parquet(ppl, index=False)
         path = out / f"{day}.parquet"
         fresh = path.exists() and path.stat().st_mtime > ppath.stat().st_mtime   # equal mtime -> rebuild
         if fresh and not a.rebuild:

@@ -19,7 +19,8 @@ def _stock():
 def _panel():
     t = pd.Timestamp(DAY) + config.SESSION_OPEN + pd.to_timedelta([5, 200, 300, 301], unit="s")
     return pd.DataFrame({"datetime": t, "share_equiv": [100.0, -40.0, 7.0, np.nan], "order_tick_type": [1, 2, 1, 1],
-                         "kind": ["call", "put", "call", "call"], "notional": [10.0, 10, 10, 10]})
+                         "kind": ["call", "put", "call", "call"], "notional": [10.0, 10, 10, 10],
+                         "T": [30 / 365, 200 / 365, 30 / 365, 30 / 365]})
 
 
 def test_window_excludes_tau_itself_and_older_than_k():
@@ -27,6 +28,7 @@ def test_window_excludes_tau_itself_and_older_than_k():
     first = f.iloc[0]                                    # τ = 09:05: window [09:00, 09:05)
     assert first["tau"] == pd.Timestamp(DAY) + config.H4_FIRST_TAU
     assert first["F"] == 60 and first["F_call"] == 100 and first["F_put"] == -40      # 09:05:00 trade excluded
+    assert first["F_short"] == 100 and first["F_long"] == -40
     assert first["stock_shares"] == 10 * 1000 and first["stock_signed"] == (2 - 3 + 4) * 1000   # first print = opening auction, unsigned
     assert first["F_norm"] == pytest.approx(60 / 2000) and first["S_mid_now"] == 1010
     assert np.isnan(first["ret_past"])                   # no 2330 tick at or before 09:00 -> unknown, not guessed

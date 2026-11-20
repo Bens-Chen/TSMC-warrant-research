@@ -3,7 +3,7 @@
 Features (``build_flow``, one file per day in <data>/flow, only information before τ):
 
 * F(τ) = Σ share_equiv over panel trades in [τ - k, τ) (delta-equivalent 2330 shares; buying puts is
-  negative), split into calls and puts. Trades without an at-trade quote have no delta and are left
+  negative), split into calls and puts, and into <= / > config.H4_SHORT_DTE_DAYS to expiry. Trades without an at-trade quote have no delta and are left
   out (``flow_notional_share`` reports the covered share of warrant notional).
 * denominator: mean 2330 shares traded in the same time-of-day window [τ - k, τ) over the previous
   config.H4_NORM_LOOKBACK_DAYS trading days (NaN until that many days exist).
@@ -29,7 +29,7 @@ from wtox.research import config
 from wtox.research.toxicity import bh_fdr
 from wtox.research.trades import continuous_session, quote_mid
 
-FLOW_COLUMNS = ["F", "F_call", "F_put"]
+FLOW_COLUMNS = ["F", "F_call", "F_put", "F_short", "F_long"]
 
 
 def taus(day):
@@ -71,8 +71,9 @@ def build_flow(panel, stock, day, denom):
     p = panel[ok].sort_values("datetime", kind="mergesort")
     t = p["datetime"].to_numpy()
     out = sw.copy()
+    short = (p["T"] * config.DAYS_PER_YEAR <= config.H4_SHORT_DTE_DAYS).to_numpy()
     for col, m in [("F", np.ones(len(p), bool)), ("F_call", (p["kind"] == "call").to_numpy()),
-                   ("F_put", (p["kind"] == "put").to_numpy())]:
+                   ("F_put", (p["kind"] == "put").to_numpy()), ("F_short", short), ("F_long", ~short)]:
         out[col] = _window_sum(t, np.where(m, p["share_equiv"].to_numpy(float), 0.0), tau, k)
     out["n_trades"] = _window_sum(t, np.ones(len(p)), tau, k)
     out["denom"] = np.asarray(denom, float)

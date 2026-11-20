@@ -114,3 +114,21 @@ def test_grid_labels_mid_at_tau_and_tau_plus_h():
     assert g.loc[ts("09:02"), "S_mid_5m"] == 102                     # 09:07 -> 09:06:10 tick
     assert g.loc[ts("13:24"), "trunc_5m"] and g.loc[ts("13:24"), "S_mid_5m"] == 103
     assert (g["S_mid_close"] == 103).all() and len(g) == 265         # 09:00 ... 13:24
+
+
+def test_placebo_labels_random_time_in_session_and_reproducible():
+    from wtox.research.markout import build_placebo_labels
+    day = "2025-03-03"
+    t = pd.Timestamp(day) + pd.to_timedelta(["09:00:30", "11:00:00", "13:24:59"])
+    stock = pd.DataFrame({"datetime": t, "close": [100.0, 101, 102], "bid_price": [99.0, 100, 101],
+                          "ask_price": [101.0, 102, 103]})
+    panel = pd.DataFrame({"trade_id": range(50), "datetime": pd.Timestamp(f"{day} 10:00"), "warrant_id": "A"})
+    a = build_placebo_labels(panel, stock, day, "5m", seed=1)
+    b = build_placebo_labels(panel, stock, day, "5m", seed=1)
+    assert a.equals(b) and len(a) == 50
+    tod = a["rand_time"] - pd.Timestamp(day)
+    assert (tod >= pd.Timedelta(hours=9)).all() and (tod < pd.Timedelta(hours=13, minutes=25)).all()
+    late = a["rand_time"] + pd.Timedelta(minutes=5) > t[-1]
+    assert (a["trunc_rand_5m"] == late).all()
+    early = a["rand_time"] < pd.Timestamp(f"{day} 09:00:30")
+    assert a.loc[early, "S_mid_rand"].isna().all()
