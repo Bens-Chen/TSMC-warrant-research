@@ -5,7 +5,8 @@ import pandas as pd
 import pytest
 
 from wtox import bs_price
-from wtox.research.trades import build_day, trade_side
+from wtox.research import config
+from wtox.research.trades import build_day, load_warrant_ticks, trade_side
 
 
 def test_trade_side_uses_flag_then_price_vs_mid():
@@ -32,7 +33,8 @@ def test_build_day_aligns_quotes_and_underlying(tmp_path):
                   "bid_price": [S - 5, S + 45], "ask_price": [S + 5, S + 55]}).to_parquet(sdir / f"{day}.parquet")
     terms = pd.DataFrame({"warrant_id": ["030156"], "event_date": [pd.NaT], "event_seq": [0], "kind": ["call"],
                           "strike": [K], "ratio": [ratio], "expiry_date": [pd.Timestamp(day) + pd.Timedelta(days=100)],
-                          "issuer": ["永豐"]})
+                          "issuer": ["永豐"], "tej_id": ["030156"], "listing_date": [pd.Timestamp(day) - pd.Timedelta(days=30)],
+                          "terms_source": ["twse"], "expiry_conflict": [False]})
 
     panel = build_day(day, tmp_path, terms)
     assert len(panel) == 2  # 08:59:59 and 13:31 are outside the continuous session
@@ -44,3 +46,43 @@ def test_build_day_aligns_quotes_and_underlying(tmp_path):
     assert first["iv"] == pytest.approx(0.45, abs=0.02)
     assert first["share_equiv"] == pytest.approx(10 * 1000 * ratio * first["delta"])
     assert second["share_equiv"] < 0
+    assert panel["trade_id"].tolist() == [0, 1]
+    assert first["leverage"] == pytest.approx(abs(first["delta"]) * ratio * S / first["pre_mid"])
+    assert not first["terms_stale"] and first["terms_source"] == "twse"
+    # the post-trade quote is renamed so it cannot be mistaken for a pre-trade feature
+    assert second["post_bid"] == pytest.approx(0.10)
+    assert "bid_price" not in panel and "ask_price" not in panel
+
+
+def test_fills_of_one_order_share_the_quote_before_the_first_fill(tmp_path):
+    # one order walks two levels at 09:10:00.5; Shioaji writes 0/0 on the intermediate fill
+    day_dir = tmp_path / "d"
+    day_dir.mkdir()
+    ts = pd.to_datetime(["2026-03-10 09:05:00.000", "2026-03-10 09:10:00.500", "2026-03-10 09:10:00.500",
+                         "2026-03-10 09:20:00.000"])
+    pd.DataFrame({"warrant_id": "056552", "datetime": ts, "close": [0.82, 0.85, 0.86, 0.84],
+                  "volume": [3, 12, 52, 1], "bid_price": [0.80, 0.0, 0.84, 0.83],
+                  "ask_price": [0.85, 0.0, 0.87, 0.85], "tick_type": [1, 1, 1, 2]}).to_parquet(day_dir / "w.parquet")
+    w = load_warrant_ticks(day_dir).reset_index(drop=True)
+    assert w["pre_bid"].tolist()[1:3] == [0.80, 0.80] and w["pre_ask"].tolist()[1:3] == [0.85, 0.85]
+    assert w["fill_seq"].tolist() == [0, 0, 1, 0]
+    assert w["order_volume"].tolist()[1:3] == [64, 64] and w["n_fills"].tolist()[1:3] == [2, 2]
+    assert w["pre_quote_age_s"].tolist()[1:3] == [300.5, 300.5]
+    assert w.loc[3, "pre_bid"] == 0.84                       # next order sees the last fill's quote
+    assert np.isnan(w.loc[0, "pre_bid"])                     # first trade of the day
+
+
+def test_first_order_of_the_day_does_not_borrow_its_own_fill_quote(tmp_path):
+    day_dir = tmp_path / "d"
+    day_dir.mkdir()
+    ts = pd.to_datetime(["2026-03-10 09:10:00", "2026-03-10 09:10:00"])
+    pd.DataFrame({"warrant_id": "A", "datetime": ts, "close": [1.0, 1.01], "volume": [1, 1],
+                  "bid_price": [0.99, 1.0], "ask_price": [1.01, 1.02], "tick_type": [1, 1]}).to_parquet(day_dir / "w.parquet")
+    w = load_warrant_ticks(day_dir)
+    assert w["pre_bid"].isna().all()
+
+
+def test_sample_window_excludes_days_outside_and_listed_exclusions():
+    assert config.in_sample("2025-01-02") and config.in_sample("2026-11-18")
+    assert not config.in_sample("2026-11-19") and not config.in_sample("2024-12-31")
+    assert not config.in_sample("2026-01-09")

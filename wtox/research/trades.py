@@ -1,15 +1,28 @@
 """Trade-level panel of warrant ticks aligned with the underlying stock.
 
-One row per warrant trade during the continuous session (09:00 <= t < 13:30), with:
+One row per warrant trade during the continuous session (09:00 <= t < 13:25; 13:25-13:30 is the
+closing call auction and is excluded), with:
 
 * side: +1 investor buy (trade at the ask, exchange flag 外盤), -1 investor sell (內盤), 0 unknown.
   Shioaji's tick_type is used first; ticks without a flag fall back to price vs the pre-trade mid.
 * pre-trade quote: Shioaji's bid/ask on a tick is the quote *after* that trade, so the quote in
   force before a trade is the previous tick's bid/ask (NaN for a warrant's first trade of the day).
+  One aggressive order that walks several price levels prints several ticks with the same
+  timestamp (intermediate ones carry bid/ask 0/0); every fill of that order takes the quote before
+  its first fill. ``fill_seq`` numbers the fills, ``order_volume`` / ``n_fills`` describe the order.
+  ``pre_quote_age_s`` = seconds since that pre-trade quote was set (stale quotes are common).
 * underlying: last 2330 trade and post-trade bid/ask at or before the warrant trade (as-of join).
-* terms valid that day (strike, ratio, kind, expiry, issuer) from the TWSE terms table.
+  ``S_mid_is_trade`` marks rows where the quote was invalid and the last trade price was used.
+* terms valid that day (strike, ratio, kind, expiry, issuer), point-in-time, from TWSE + TEJ so
+  delisted warrants are kept (see wtox.research.terms).
 * iv from the pre-trade warrant mid, delta from that iv, and the delta-weighted exposure in
   underlying shares: share_equiv = side * volume * 1000 * ratio * delta (1 lot = 1,000 warrants).
+* effective leverage G = |delta| * ratio * S_mid / pre_mid (known at trade time, a feature).
+* trade_id: row number within the day, the join key for labels (wtox.research.markout).
+* post_bid / post_ask: the quote right *after* this trade. It already reflects this trade's impact,
+  so it is kept for diagnostics only and must never be a model feature (config.POST_TRADE_COLUMNS).
+
+Everything here is known at trade time. Future information belongs in labels only (CLAUDE.md §4).
 
 Build every day:  python -m wtox.research.trades --data ../data --out ../data/panel/tsmc_warrant_trades
 """
@@ -21,15 +34,22 @@ import numpy as np
 import pandas as pd
 
 from wtox import bs_greeks, warrant_iv
-from wtox.data.tej import terms_as_of
+from wtox.research import config
+from wtox.research import terms as terms_mod
 
-OPEN, CLOSE = pd.Timedelta(hours=9), pd.Timedelta(hours=13, minutes=30)
-UNITS_PER_LOT = 1000
+OPEN, CLOSE = config.SESSION_OPEN, config.CONTINUOUS_END
+UNITS_PER_LOT = config.UNITS_PER_LOT
 
 
 def continuous_session(df, col="datetime"):
     t = df[col] - df[col].dt.normalize()
     return df[(t >= OPEN) & (t < CLOSE)]
+
+
+def quote_mid(bid, ask):
+    """Mid of a valid two-sided quote, else NaN. Shared with markout.py so S_mid(t) and S_mid(t+h) match."""
+    ok = (bid > 0) & (ask > 0) & (ask >= bid)
+    return ((bid + ask) / 2).where(ok)
 
 
 def trade_side(tick_type, price, pre_mid):
@@ -44,35 +64,49 @@ def load_warrant_ticks(day_dir):
     if not frames:
         return pd.DataFrame()
     w = pd.concat(frames, ignore_index=True).sort_values(["warrant_id", "datetime"], kind="mergesort")
-    # quote before each trade = previous tick's (post-trade) quote, within the same warrant
+    # quote before each trade = previous tick's (post-trade) quote, within the same warrant;
+    # all fills sharing a timestamp take the quote before the first of them
     g = w.groupby("warrant_id", sort=False)
-    w["pre_bid"] = g["bid_price"].shift(1)
-    w["pre_ask"] = g["ask_price"].shift(1)
+    prev = pd.DataFrame({"pre_bid": g["bid_price"].shift(1), "pre_ask": g["ask_price"].shift(1),
+                         "pre_time": g["datetime"].shift(1)})
+    order = w.groupby(["warrant_id", "datetime"], sort=False)
+    w["fill_seq"] = order.cumcount()
+    first = w["fill_seq"] == 0
+    order_no = first.cumsum()          # rows of one order are contiguous after the sort above
+    for c in prev:                     # broadcast the first fill's value; a NaN there stays NaN
+        w[c] = prev[c].where(first).groupby(order_no).ffill()
+    w["pre_quote_age_s"] = (w["datetime"] - w["pre_time"]).dt.total_seconds()
+    w["order_volume"] = order["volume"].transform("sum")
+    w["n_fills"] = order["volume"].transform("size")
     return continuous_session(w)
 
 
-def build_day(day, data_dir, terms, r=0.015, q=0.0):
+def build_day(day, data_dir, terms, div_dates=(), r=config.RISK_FREE, q=config.DIVIDEND_YIELD):
     data_dir = Path(data_dir)
     w = load_warrant_ticks(data_dir / "shioaji" / "ticks" / day)
-    s_path = data_dir / "shioaji" / "underlying_ticks" / "stock" / "2330" / f"{day}.parquet"
+    s_path = data_dir / "shioaji" / "underlying_ticks" / "stock" / config.UNDERLYING / f"{day}.parquet"
     if w.empty or not s_path.exists():
         return pd.DataFrame()
     s = pd.read_parquet(s_path)[["datetime", "close", "bid_price", "ask_price"]]
-    s = s.rename(columns={"close": "S", "bid_price": "S_bid", "ask_price": "S_ask"}).sort_values("datetime")
+    s = s.rename(columns={"close": "S", "bid_price": "S_bid", "ask_price": "S_ask"}).sort_values("datetime", kind="mergesort")
 
     w = w.sort_values("datetime", kind="mergesort")
     w = pd.merge_asof(w, s, on="datetime", direction="backward")
 
-    cur = terms_as_of(terms, day)[["warrant_id", "kind", "strike", "ratio", "expiry_date", "issuer"]]
+    cur = terms_mod.terms_on(terms, day, div_dates)[
+        ["warrant_id", "tej_id", "kind", "strike", "ratio", "expiry_date", "issuer", "terms_source", "terms_stale",
+         "expiry_conflict"]]
+    no_terms = sorted(set(w["warrant_id"]) - set(cur["warrant_id"]))
     w = w.merge(cur, on="warrant_id", how="inner")
-    w["T"] = (w["expiry_date"] - pd.Timestamp(day)).dt.days / 365.0
+    w["T"] = (w["expiry_date"] - pd.Timestamp(day)).dt.days / config.DAYS_PER_YEAR
 
-    valid_quote = (w["pre_bid"] > 0) & (w["pre_ask"] > 0) & (w["pre_ask"] >= w["pre_bid"])
-    w["pre_mid"] = ((w["pre_bid"] + w["pre_ask"]) / 2).where(valid_quote)
-    w["pre_spread_pct"] = ((w["pre_ask"] - w["pre_bid"]) / w["pre_mid"]).where(valid_quote)
+    w["pre_mid"] = quote_mid(w["pre_bid"], w["pre_ask"])
+    w["pre_spread_pct"] = (w["pre_ask"] - w["pre_bid"]) / w["pre_mid"]
     w["side"] = trade_side(w["tick_type"].to_numpy(), w["close"].to_numpy(), w["pre_mid"].to_numpy())
 
-    S_mid = ((w["S_bid"] + w["S_ask"]) / 2).where((w["S_bid"] > 0) & (w["S_ask"] > 0), w["S"])
+    S_mid = quote_mid(w["S_bid"], w["S_ask"])
+    w["S_mid_is_trade"] = S_mid.isna() & w["S"].notna()
+    S_mid = S_mid.fillna(w["S"])
     w["S_mid"] = S_mid
     ok = w["pre_mid"].notna() & (w["T"] > 0) & S_mid.notna()
     iv = np.full(len(w), np.nan)
@@ -92,11 +126,18 @@ def build_day(day, data_dir, terms, r=0.015, q=0.0):
     w["signed_volume"] = w["side"] * w["volume"]
     w["share_equiv"] = w["signed_volume"] * UNITS_PER_LOT * w["ratio"] * w["delta"]
     w["notional"] = w["close"] * w["volume"] * UNITS_PER_LOT
+    w["post_bid"], w["post_ask"] = w["bid_price"], w["ask_price"]
+    w["leverage"] = w["delta"].abs() * w["ratio"] * w["S_mid"] / w["pre_mid"]
 
-    cols = ["datetime", "warrant_id", "issuer", "kind", "strike", "ratio", "T", "close", "volume", "tick_type", "side",
-            "pre_bid", "pre_ask", "pre_mid", "pre_spread_pct", "bid_price", "ask_price", "S", "S_mid", "moneyness",
-            "iv", "delta", "signed_volume", "share_equiv", "notional"]
-    return w[cols].sort_values(["datetime", "warrant_id"]).reset_index(drop=True)
+    cols = ["datetime", "warrant_id", "tej_id", "issuer", "kind", "strike", "ratio", "T", "close", "volume",
+            "fill_seq", "n_fills", "order_volume", "tick_type", "side",
+            "pre_bid", "pre_ask", "pre_mid", "pre_spread_pct", "pre_quote_age_s", "post_bid", "post_ask",
+            "S", "S_mid", "S_mid_is_trade", "moneyness", "iv", "delta", "leverage", "signed_volume", "share_equiv",
+            "notional", "terms_source", "terms_stale", "expiry_conflict"]
+    w = w[cols].sort_values(["datetime", "warrant_id"], kind="mergesort").reset_index(drop=True)
+    w.insert(0, "trade_id", np.arange(len(w), dtype="int64"))
+    w.attrs["no_terms"] = no_terms
+    return w
 
 
 def main(argv=None):
@@ -107,16 +148,17 @@ def main(argv=None):
     a = p.parse_args(argv)
     data, out = Path(a.data), Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
-    terms = pd.read_parquet(data / "twse" / "terms_2330.parquet")
-    days = sorted(d.name for d in (data / "shioaji" / "ticks").iterdir() if d.is_dir())
+    terms, div_dates = terms_mod.load(data, config.UNDERLYING)
+    days = sorted(d.name for d in (data / "shioaji" / "ticks").iterdir() if d.is_dir() and config.in_sample(d.name))
     for day in days:
         path = out / f"{day}.parquet"
         if path.exists() and not a.rebuild:
             continue
-        panel = build_day(day, data, terms)
+        panel = build_day(day, data, terms, div_dates)
         if len(panel):
             panel.to_parquet(path, index=False)
-        print(day, len(panel), "trades", f"iv ok {panel['iv'].notna().mean():.0%}" if len(panel) else "")
+        print(day, len(panel), "trades", f"iv ok {panel['iv'].notna().mean():.0%}" if len(panel) else "",
+              f"no terms: {len(panel.attrs.get('no_terms', []))} warrants" if len(panel) else "")
 
 
 if __name__ == "__main__":
