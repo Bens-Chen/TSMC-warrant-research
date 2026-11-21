@@ -207,3 +207,12 @@ E_BOOK_COSTS = "optimistic"                  # and for the issuer book
 # 2330 locked at a price limit: no valid 2330 quote all day, S_mid frozen at the last print. Found by the
 # audit after the results (2025-04-07, 2025-04-10); reported as a disclosed sensitivity, not a new main sample.
 LOCKED_DAY_TRADE_MID_SHARE = 0.5             # day is "locked" if >= 50% of its trades have S_mid from a trade price
+
+# --- extension: who wins / who loses, phase 1 intraday (docs/decisions.md 2026-11-22, before any result) ---
+RETAIL_HORIZONS = ("5m", "close")            # retail holding periods (intraday); multi-day is phase 2
+RETAIL_FEE = BROKERAGE_FEE_MAX               # per side, statutory cap (conservative)
+RETAIL_ROUND_TRIP_TAX = WARRANT_TAX          # warrant transaction tax on the sell leg
+RETAIL_RV_DAYS = 20                          # 2330 realised vol: previous 20 trading days, close-to-close (13:25 mid)
+RETAIL_FLAT_BPS = 1.0                        # |past 5m return| below this = "flat" (chase / futures conditions)
+RETAIL_TX_FILE = "futures_continuous/TX_continuous_1m_post_latest.parquet"
+RETAIL_TX_BAR = pd.Timedelta(minutes=1)      # a bar stamped ts is used only from ts + 1 min (no look-ahead either way)
