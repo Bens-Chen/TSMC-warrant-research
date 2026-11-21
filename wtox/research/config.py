@@ -216,3 +216,4 @@ RETAIL_RV_DAYS = 20                          # 2330 realised vol: previous 20 tr
 RETAIL_FLAT_BPS = 1.0                        # |past 5m return| below this = "flat" (chase / futures conditions)
 RETAIL_TX_FILE = "futures_continuous/TX_continuous_1m_post_latest.parquet"
 RETAIL_TX_BAR = pd.Timedelta(minutes=1)      # a bar stamped ts is used only from ts + 1 min (no look-ahead either way)
+RETAIL_TX_MAX_STALE = pd.Timedelta(minutes=3)    # TAIEX futures bar older than this (or from an earlier day) -> no value
