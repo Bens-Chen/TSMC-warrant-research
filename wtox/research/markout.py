@@ -24,6 +24,11 @@ Grid labels (``build_grid_labels``, labels/tsmc_grid/<day>.parquet): on the fixe
 Placebo labels (``build_placebo_labels``, labels/tsmc_placebo/<day>.parquet, stage 4): a random time
 in the same session per trade and the 2330 mid there and h later.
 
+IV path labels (``build_iv_path``, labels/iv_path/<day>.parquet, extension E): per warrant and grid
+point τ, the at-trade mid IV of the warrant's last quoted trade at or before τ (NaN before the first;
+IVs at the solver bounds are dropped). Built from the panel only; it is a label because E reads it at
+grid points after each trade.
+
 Build every day:  python -m wtox.research.markout --data ../data
 """
 
@@ -32,6 +37,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 
 from wtox.research import config
 from wtox.research.trades import quote_mid
@@ -138,6 +144,23 @@ def build_placebo_labels(panel, stock, day, horizon=None, seed=None):
     return out.reset_index(drop=True)
 
 
+def build_iv_path(panel, day, grid=None):
+    grid = config.H4_GRID if grid is None else grid
+    lo, hi = config.EXT_PROXY_IV_BOUNDS
+    ok = (panel["pre_mid"].notna() & panel["iv"].notna() & panel["delta"].notna()
+          & panel["order_tick_type"].isin([1, 2]) & (panel["T"] > 0) & (panel["iv"] > lo) & (panel["iv"] < hi))
+    src = panel.loc[ok, ["warrant_id", "datetime", "iv"]].sort_values("datetime", kind="mergesort")
+    src["datetime"] = src["datetime"].astype("datetime64[ns]")
+    if src.empty:
+        return pd.DataFrame(columns=["warrant_id", "tau", "iv_tau"])
+    d = pd.Timestamp(day)
+    tau = pd.date_range(d + config.SESSION_OPEN, d + config.CONTINUOUS_END, freq=grid, inclusive="left").astype("datetime64[ns]")
+    q = pd.MultiIndex.from_product([src["warrant_id"].unique(), tau], names=["warrant_id", "tau"]).to_frame(index=False)
+    q = q.sort_values("tau", kind="mergesort")
+    m = pd.merge_asof(q, src, left_on="tau", right_on="datetime", by="warrant_id", direction="backward")
+    return m[["warrant_id", "tau"]].assign(iv_tau=m["iv"].to_numpy()).sort_values(["warrant_id", "tau"]).reset_index(drop=True)
+
+
 def build_day(day, data_dir, panel_dir):
     data_dir = Path(data_dir)
     ppath = Path(panel_dir) / f"{day}.parquet"
@@ -168,6 +191,8 @@ def main(argv=None):
     grid_out.mkdir(parents=True, exist_ok=True)
     plc_out = out.parent / "tsmc_placebo"
     plc_out.mkdir(parents=True, exist_ok=True)
+    iv_out = out.parent / "iv_path"
+    iv_out.mkdir(parents=True, exist_ok=True)
     for ppath in sorted(panel_dir.glob("*.parquet")):
         day = ppath.stem
         if not config.in_sample(day):
@@ -183,6 +208,11 @@ def main(argv=None):
             pl = build_placebo_labels(pd.read_parquet(ppath, columns=KEY), pd.read_parquet(spath), day)
             if len(pl):
                 pl.to_parquet(ppl, index=False)
+        ivp = iv_out / f"{day}.parquet"
+        iv_cols = ["warrant_id", "datetime", "pre_mid", "iv", "delta", "order_tick_type", "T"]
+        if (a.rebuild or not ivp.exists() or ivp.stat().st_mtime <= ppath.stat().st_mtime) \
+                and set(iv_cols) <= set(pq.read_schema(ppath).names):
+            build_iv_path(pd.read_parquet(ppath, columns=iv_cols), day).to_parquet(ivp, index=False)
         path = out / f"{day}.parquet"
         fresh = path.exists() and path.stat().st_mtime > ppath.stat().st_mtime   # equal mtime -> rebuild
         if fresh and not a.rebuild:

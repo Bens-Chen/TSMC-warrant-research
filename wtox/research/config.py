@@ -178,3 +178,27 @@ IV_PAIR_MAX_GAP = pd.Timedelta(minutes=30)
 
 # Dividends (FinMind TaiwanStockDividend), stored at <data>/finmind/dividends_2330.parquet.
 DIVIDEND_FILE = "finmind/dividends_2330.parquet"
+
+# --- extension analyses B-D (docs/decisions.md, 2026-11-21, pre-registered before any result) ---------
+EXT_PROXY_IV_BOUNDS = (1.01e-4, 4.95)        # solver bounds are 1e-4 / 5.0 (wtox.iv): IVs at the edge are invalid
+EXT_PROXY_EQUIV_MARGIN_BPS = 5.0             # B: proxy used only if the paired-bias CI lies inside +-5 bps
+EXT_PROXY_CI = 0.90                          #    (90% CI, DTE 1-30 group)
+EXT_TRADING_DAY_EDGES = (-1, 5, 10, 15, 20, 30)          # B: trading days to expiry (approx. business days)
+EXT_TRADING_DAY_LABELS = ("0–5", "6–10", "11–15", "16–20", "21–30")
+EXT_PRICE_EDGES = (0, 0.05, 0.5, float("inf"))           # B: fill price P, NTD
+EXT_PRICE_LABELS = ("≤0.05", "0.05–0.5", ">0.5")
+EXT_IV_AGE_EDGES = (-1, 300, 3600, float("inf"))         # B: seconds since the proxy IV was observed
+EXT_IV_AGE_LABELS = ("<5分", "5–60分", ">60分")
+EXT_C2_LAST_TRADE = pd.Timedelta(hours=12, minutes=55)   # C2: fixed sample, every horizon untruncated
+EXT_C2_HORIZONS = ("30m", "close")                       # compared with 5m
+EXT_C2_H4_HORIZONS = ("1m", "30m", "close")
+EXT_REVERSION_SHARE = 0.5                    # C2: "no marked reversion" = CI lower bound above -50% of M(5m)
+
+# --- extension E: issuer dynamic hedging (docs/decisions.md, 2026-11-21, before any result) ----------
+E_LATENCY = "1s"                             # initial hedge fills at S_mid(t + L); labels S_mid_<L>
+E_LATENCY_SENSITIVITY = ("10s", "1m")        # trade level, ladders 1 and 3
+E_HORIZONS = {"5m": 1, "close": 5}           # holding period -> trade-level rebalancing every n minutes
+E_REBALANCE_SENSITIVITY = 1                  # close, trade level, ladders 2 and 3: every minute
+E_BOOK_BAND_SHARES = 2000                    # issuer book (close only): re-hedge when |net delta - hedge| > band
+E_TRADE_COSTS = "pessimistic"                # HEDGE_SCENARIOS key for the trade level
+E_BOOK_COSTS = "optimistic"                  # and for the issuer book

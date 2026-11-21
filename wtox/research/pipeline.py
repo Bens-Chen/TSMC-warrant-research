@@ -10,9 +10,9 @@ is applied by hand only after the standard is written into CLAUDE.md §10.
 import argparse
 from pathlib import Path
 
-from wtox.research import clock, config, coverage, dividends, flow, ivcheck, markout, quotes, robustness, toxicity, trades
+from wtox.research import clock, config, coverage, dividends, extension, flow, hedging, ivcheck, markout, quotes, robustness, toxicity, trades
 
-STEPS = ("panel", "labels", "coverage", "quotes", "ivcheck", "clock", "flow", "toxicity", "h4", "robustness")
+STEPS = ("panel", "labels", "coverage", "quotes", "ivcheck", "clock", "flow", "toxicity", "h4", "robustness", "extension", "hedging")
 
 
 def run(data, steps=STEPS, rebuild=False):
@@ -48,6 +48,10 @@ def run(data, steps=STEPS, rebuild=False):
             flow.run_h4(data)
         elif step == "robustness":
             robustness.run(data)
+        elif step == "extension":
+            extension.run(data)
+        elif step == "hedging":
+            hedging.run(data)
         else:
             raise ValueError(f"unknown step {step!r}; choose from {STEPS}")
 
