@@ -208,11 +208,42 @@ def b_estimate(d, proxy_ok):
     return pd.DataFrame(rows)
 
 
+def b_breakdown(d):
+    """Post-hoc (audit): proxy markout of the missing-quote trades by direction x fill price, next to the
+    quoted trades' true markout in the same cells."""
+    rows = []
+    for scope, s in _scopes(d):
+        for (dirn, pb), g in s.groupby(["direction", "price_bucket"], observed=True):
+            for what, x, col in [("missing_proxy", g[~g["has_quote"] & g["x_proxy"].notna()], "x_proxy"),
+                                 ("quoted_true", g[g["has_quote"] & g["x_true"].notna()], "x_true")]:
+                rows.append({"scope": scope, "direction": dirn, "price_bucket": str(pb), "estimate": what,
+                             **_cm(x[col], x["notional_P"], x["day"]), "notional": x["notional_P"].sum()})
+    return pd.DataFrame(rows)
+
+
 def b_run(days, data_dir, seed_day=None):
     d = b_frame(days, data_dir, seed_day)
     val = b_validation(d)
     ok = bool(val.loc[val["criterion"], "within_margin"].iloc[0]) if val["criterion"].any() else False
-    return {"b_features": b_feature_table(d), "b_validation": val, "b_estimate": b_estimate(d, ok)}
+    return {"b_features": b_feature_table(d), "b_validation": val, "b_estimate": b_estimate(d, ok),
+            "b_breakdown": b_breakdown(d)}
+
+
+# --- post-hoc: price-limit lock days (audit) --------------------------------------------------
+
+def locked_sensitivity(trades):
+    """Stage 3 main decomposition with and without the days 2330 was locked at a price limit."""
+    dm = trades[~trades[f"trunc_{MAIN}"]].copy()
+    for k in config.HEDGE_SCENARIOS:
+        dm[f"net_{k}"] = dm[f"RS_dt_{MAIN}"] - dm[f"cost_{k}"]
+    vals = ["ES", f"RS_dt_{MAIN}", f"M_dt_{MAIN}"] + [f"cost_{k}" for k in config.HEDGE_SCENARIOS] + \
+           [f"net_{k}" for k in config.HEDGE_SCENARIOS]
+    locked = toxicity.locked_days(dm)
+    day = dm["datetime"].dt.strftime("%Y-%m-%d")
+    out = [toxicity.table(dm, vals).assign(sample="all"),
+           toxicity.table(dm[~day.isin(locked)], vals).assign(sample="excl_locked"),
+           toxicity.table(dm[day.isin(locked)], vals).assign(sample="locked_only")]
+    return pd.concat(out, ignore_index=True).assign(locked_days=",".join(locked))
 
 
 # --- C: hedging impact vs information --------------------------------------------------------
@@ -423,6 +454,7 @@ def run(data_dir, out_dir=None):
         for k, v in b_run(days, data_dir, before[-1] if before else None).items():
             save(f"{k}_{label}", v)
         trades, _ = toxicity.build(days, data_dir)
+        save(f"locked_sensitivity_{label}", locked_sensitivity(trades))
         for k, v in c_run([x for x in days if x in flow_days], data_dir, trades).items():
             save(f"{k}_{label}", v)
     fd = lambda xs: [x for x in xs if x in flow_days]

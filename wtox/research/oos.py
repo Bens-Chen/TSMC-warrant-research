@@ -394,6 +394,10 @@ def _git_state():
 def run(data_dir, dry_run=True, out_dir=None):
     data_dir = Path(data_dir)
     head, dirty, diff = _git_state()
+    meta = Path(out_dir or Path(data_dir) / "results" / ("stage5_dryrun" if dry_run else "stage5")) / "meta.parquet"
+    if not dry_run and meta.exists():
+        raise RuntimeError(f"{meta} exists: the test period was already evaluated once (CLAUDE.md §5.4). "
+                           "A re-run must be justified in docs/decisions.md and the old outputs moved first.")
     if not dry_run:
         if not config.TEST_UNLOCKED:
             raise PermissionError("set config.TEST_UNLOCKED = True only for the single test run (CLAUDE.md §10)")

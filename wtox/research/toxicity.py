@@ -141,6 +141,12 @@ def add_cuts(d):
     return d
 
 
+def locked_days(d):
+    """Days on which 2330 had no valid quote (S_mid from trade prices for most trades): a price-limit lock."""
+    share = d["S_mid_is_trade"].astype(float).groupby(d["datetime"].dt.strftime("%Y-%m-%d")).mean()
+    return sorted(share[share >= config.LOCKED_DAY_TRADE_MID_SHARE].index)
+
+
 # --- aggregation -----------------------------------------------------------------------------
 
 def cluster_mean(x, w, cluster):

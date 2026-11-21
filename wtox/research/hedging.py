@@ -292,20 +292,34 @@ def simulate_day(d, grid, ivp, flows):
 
 # --- driver ----------------------------------------------------------------------------------
 
-def day_frame(day, data_dir):
+def day_frame(day, data_dir, spread_fallback=np.nan):
+    """``spread_fallback``: the period median 2330 spread, used for the stage 3 reference costs on a day
+    with no valid 2330 quote (as toxicity.hedge_costs does on the whole stage 3 frame)."""
     d, grid = toxicity.load_day(day, data_dir)
     d = d[toxicity.eligible(d)]
     d = toxicity.trade_metrics(d, {"5m": config.HORIZONS["5m"], "close": None})
     d = toxicity.detrend(d, toxicity.day_drift(grid, {"5m": config.HORIZONS["5m"], "close": None}), ["5m", "close"])
-    d = toxicity.add_cuts(toxicity.hedge_costs(d))
+    sp = d["S_spread_bps"]
+    costs = toxicity.hedge_costs(d.assign(S_spread_bps=sp.fillna(spread_fallback)) if sp.isna().all() else d.copy())
+    d = toxicity.add_cuts(d.assign(**{c: costs[c] for c in costs if c.startswith("cost_")}))
     return d.reset_index(drop=True), grid
+
+
+def _period_spread_median(days, data_dir):
+    cols = ["pre_mid", "iv", "delta", "order_tick_type", "T", "S_spread_bps"]
+    for day in days:
+        config.check_unlocked(day)
+    x = pd.concat([pd.read_parquet(Path(data_dir) / "panel" / "tsmc_warrant_trades" / f"{day}.parquet", columns=cols)
+                   for day in days], ignore_index=True)
+    return float(x.loc[toxicity.eligible(x), "S_spread_bps"].median())
 
 
 def run_period(days, data_dir):
     data_dir = Path(data_dir)
     res, trades = {}, []
+    fallback = _period_spread_median(days, data_dir)
     for day in days:
-        d, grid = day_frame(day, data_dir)
+        d, grid = day_frame(day, data_dir, fallback)
         if d.empty:
             continue
         ivp_path = data_dir / "labels" / "iv_path" / f"{day}.parquet"
@@ -317,7 +331,8 @@ def run_period(days, data_dir):
         for k in config.HEDGE_SCENARIOS:
             d[f"stage3_net_{k}"] = (d["RS_dt_5m"] - d[f"cost_{k}"]).where(~d["trunc_5m"].astype(bool))
             d[f"stage3_close_net_{k}"] = d["RS_dt_close"] - d[f"cost_{k}"]
-        trades.append(d[keep + [c for c in d if c.startswith("stage3_")]].assign(day=day, pos=d.index))
+        locked = bool(toxicity.locked_days(d))
+        trades.append(d[keep + [c for c in d if c.startswith("stage3_")]].assign(day=day, pos=d.index, locked=locked))
         for key, frame in sim.items():
             res.setdefault(key, []).append(frame.rename_axis("pos").reset_index().assign(day=day))
     t = pd.concat(trades, ignore_index=True)
@@ -325,6 +340,15 @@ def run_period(days, data_dir):
 
 
 def tables(t, res):
+    """All trades and (post-hoc, audit) without the price-limit lock days, stacked with a ``sample`` column."""
+    out = {}
+    for name, sub in [("all", t), ("excl_locked", t[~t["locked"]])]:
+        for k, v in _tables(sub, res).items():
+            out.setdefault(k, []).append(v.assign(sample=name))
+    return {k: pd.concat(v, ignore_index=True) for k, v in out.items()}
+
+
+def _tables(t, res):
     """Notional-weighted, day-clustered means (bps) for every variant, overall and by the main cuts."""
     t = t.copy()
     t["high_gamma"] = np.where((t["delta_bucket"] == config.HIGH_GAMMA_CELL[0]) & (t["dte_bucket"] == config.HIGH_GAMMA_CELL[1]),

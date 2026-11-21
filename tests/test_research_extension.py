@@ -139,3 +139,20 @@ def test_carry_rejects_reused_code():
              "B": (pd.Timestamp("2025-03-03 13:00"), 0.3, 80.0, "call", exp)}     # B: another warrant, same code
     iv, _, _ = ext.proxy_iv(p, carry)
     assert iv[0] == pytest.approx(0.3) and np.isnan(iv[1])
+
+
+def test_locked_days_detected():
+    from wtox.research import toxicity
+    d = pd.DataFrame({"datetime": pd.to_datetime(["2025-04-07 10:00"] * 3 + ["2025-04-08 10:00"] * 3),
+                      "S_mid_is_trade": [True, True, False, False, False, True]})
+    assert toxicity.locked_days(d) == ["2025-04-07"]
+
+
+def test_stage5_refuses_second_run(tmp_path, monkeypatch):
+    from wtox.research import oos
+    out = tmp_path / "stage5"
+    out.mkdir()
+    pd.DataFrame([{"commit": "x"}]).to_parquet(out / "meta.parquet")
+    monkeypatch.setattr(oos, "_git_state", lambda: ("x", False, ""))
+    with pytest.raises(RuntimeError, match="already evaluated"):
+        oos.run(tmp_path, dry_run=False, out_dir=out)

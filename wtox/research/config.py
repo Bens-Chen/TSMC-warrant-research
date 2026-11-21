@@ -202,3 +202,8 @@ E_REBALANCE_SENSITIVITY = 1                  # close, trade level, ladders 2 and
 E_BOOK_BAND_SHARES = 2000                    # issuer book (close only): re-hedge when |net delta - hedge| > band
 E_TRADE_COSTS = "pessimistic"                # HEDGE_SCENARIOS key for the trade level
 E_BOOK_COSTS = "optimistic"                  # and for the issuer book
+
+# --- post-hoc sensitivity (docs/decisions.md, 2026-11-21 audit) --------------------------------------
+# 2330 locked at a price limit: no valid 2330 quote all day, S_mid frozen at the last print. Found by the
+# audit after the results (2025-04-07, 2025-04-10); reported as a disclosed sensitivity, not a new main sample.
+LOCKED_DAY_TRADE_MID_SHARE = 0.5             # day is "locked" if >= 50% of its trades have S_mid from a trade price
