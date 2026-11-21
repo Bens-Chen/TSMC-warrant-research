@@ -170,6 +170,144 @@ def quadrants(m, alpha=0.05):
     return out.reset_index()
 
 
+# --- phase 2: multi-day holding (trader side) -------------------------------------------------
+
+def nw_mean(x, w, day, lag, all_days=None):
+    """Weighted mean and a Newey-West SE over the entry-day score series (Bartlett, ``lag`` trading days).
+    ``all_days``: every trading day of the period, so days with no trade in the group count as zero scores
+    and the lag is in trading days, not observed days. Degrees of freedom use the observed days."""
+    x, w, day = np.asarray(x, float), np.asarray(w, float), np.asarray(day)
+    ok = ~np.isnan(x) & ~np.isnan(w)
+    x, w, day = x[ok], w[ok], day[ok]
+    if len(x) == 0 or w.sum() == 0:
+        return np.nan, np.nan, 0, 0
+    W = w.sum()
+    m = (w * x).sum() / W
+    g = pd.Series(w * (x - m)).groupby(day).sum().sort_index()
+    G = len(g)
+    if all_days is not None:
+        g = g.reindex(all_days, fill_value=0.0)
+    g = g.to_numpy()
+    V = (g ** 2).sum()
+    for l in range(1, min(lag, G - 1) + 1):
+        V += 2 * (1 - l / (lag + 1)) * (g[l:] * g[:-l]).sum()
+    return m, np.sqrt(max(V, 0.0)) / W if G > 1 else np.nan, int(len(x)), G
+
+
+def nw_table(d, values, lag, by=(), all_days=None):
+    from scipy import stats
+    rows = []
+    groups = d.groupby(list(by), observed=True) if by else [((), d)]
+    for key, g in groups:
+        key = key if isinstance(key, tuple) else (key,)
+        day = g["datetime"].dt.normalize().to_numpy()
+        for v in values:
+            m, se, n, G = nw_mean(g[v], g["weight"], day, lag, all_days)
+            t = m / se if se and se > 0 else np.nan
+            rows.append({**dict(zip(by, key)), "value": v, "mean_bps": m * 1e4, "se_bps": se * 1e4, "t": t,
+                         "p": 2 * stats.t.sf(abs(t), max(G - 1, 1)) if not np.isnan(t) else np.nan, "n": n, "n_days": G,
+                         "obs_share": float(g.loc[g[v].notna(), "weight"].sum() / g["weight"].sum())})
+    return pd.DataFrame(rows)
+
+
+def intrinsic(S, K, ratio, kind):
+    return np.where(kind == "put", np.maximum(K - S, 0.0), np.maximum(S - K, 0.0)) * ratio
+
+
+def multiday_metrics(d, mu):
+    """Buys only. d has exit labels joined (bid_k, S_close_k, expired_k, S_settle_k). mu: the period's mean
+    daily 2330 return (de-trending, statistical tests only)."""
+    d = d[d["side"] > 0].copy()
+    for k in config.RETAIL_HOLD_DAYS:
+        exp = d[f"expired_{k}"].astype("boolean").fillna(False).to_numpy(bool)
+        S_exit = np.where(exp, d[f"S_settle_{k}"], d[f"S_close_{k}"])
+        val = np.where(exp, intrinsic(d[f"S_settle_{k}"].to_numpy(float), d["strike"].to_numpy(float),
+                                      d["ratio"].to_numpy(float), d["kind"].to_numpy()), d[f"bid_{k}"])
+        val = np.where(exp | (d[f"bid_{k}"] > 0), val, np.nan)
+        raw = (val - d["close"]) / d["pre_mid"] - COST_RT
+        expo = d["side"] * d["delta"] * d["ratio"] / d["pre_mid"]
+        d[f"hold_raw_{k}"] = raw
+        d[f"hold_dt_{k}"] = raw - expo * d["S_mid"] * mu * k
+        d[f"hold_dir_{k}"] = (expo * (S_exit - d["S_mid"])).where(raw.notna())
+        d[f"hold_resid_{k}"] = raw - d[f"hold_dir_{k}"]
+        # unobserved exits close to expiry (likely after the last trading day, before expiry: no quote)
+        near = (pd.to_datetime(d[f"expiry_{k}"]) - pd.to_datetime(d[f"exit_day_{k}"])).dt.days.between(0, 14)
+        d[f"unobs_near_expiry_{k}"] = (raw.isna() & near & ~exp).astype(float)
+        d[f"expired_share_{k}"] = exp.astype(float)
+    return d
+
+
+def multiday_summary(d):
+    """Per k: exit coverage, expiry settlement, unobserved exits near expiry, exit-bid age."""
+    rows = []
+    for k in config.RETAIL_HOLD_DAYS:
+        w = d["weight"]
+        obs = d[f"hold_raw_{k}"].notna()
+        for scope, m in [("all", pd.Series(True, index=d.index)), ("dte_1-30", d["dte_bucket"].astype(str) == "1–30")]:
+            ww = w[m]
+            rows.append({"hold": k, "scope": scope, "obs_share": float(ww[obs[m]].sum() / ww.sum()),
+                         "expired_share": float((d.loc[m, f"expired_share_{k}"] * ww).sum() / ww.sum()),
+                         "unobs_near_expiry_share": float((d.loc[m, f"unobs_near_expiry_{k}"] * ww).sum() / ww.sum()),
+                         "bid_age_median_s": float(d.loc[m & obs, f"bid_age_s_{k}"].median())})
+    return pd.DataFrame(rows)
+
+
+def multiday_map(d):
+    by_cols = sorted({c for _, by in group_sets() for c in by})
+    d = d[["datetime", "weight"] + by_cols + [c for c in d if c.startswith("hold_")]]
+    all_days = np.sort(d["datetime"].dt.normalize().unique())
+    rows = []
+    for k in config.RETAIL_HOLD_DAYS:
+        vals = [f"hold_{x}_{k}" for x in ("raw", "dt", "dir", "resid")]
+        rows.append(nw_table(d, vals, k, all_days=all_days).assign(hold=k, group_set="all", group="all"))
+        for name, by in group_sets():
+            t = nw_table(d, vals, k, by, all_days)
+            t["group"] = t[by].astype(str).agg("|".join, axis=1)
+            rows.append(t.drop(columns=by).assign(hold=k, group_set=name))
+    return pd.concat(rows, ignore_index=True)
+
+
+def multiday_finalise(m, phase1_include, k_include=None):
+    m = m.copy()
+    m["missing_label"] = m["group"].str.split("|").apply(lambda parts: any(x in ("na", "nan") for x in parts))
+    if k_include is None:
+        ok = (m["n"] >= config.HEATMAP_MIN_TRADES) & (m["n_days"] >= config.HEATMAP_MIN_DAYS) & m["value"].str.startswith("hold_dt_")
+        k_include = set(map(tuple, m.loc[ok, ["hold", "group_set", "group"]].to_numpy()))
+    base = np.array([("buys", gs, g) in phase1_include for gs, g in zip(m["group_set"], m["group"])])
+    kin = np.array([(h, gs, g) in k_include for h, gs, g in zip(m["hold"], m["group_set"], m["group"])])
+    m["include"] = base & kin & ~m["missing_label"].to_numpy(bool)
+    m["p_bh"] = np.nan
+    for _, idx in m[m["include"] & (m["group_set"] != "all")].groupby(["hold", "value"]).groups.items():
+        m.loc[idx, "p_bh"] = toxicity.bh_fdr(m.loc[idx, "p"])
+    return m, k_include
+
+
+def multiday_quadrants(md, p1, alpha=0.05):
+    k = config.RETAIL_MAIN_HOLD
+    t = md[(md["hold"] == k) & (md["value"] == f"hold_dt_{k}") & md["include"] & (md["group_set"] != "all")]
+    mm = p1[(p1["sample"] == "buys") & (p1["value"] == "mm_neutral_5m")][["group_set", "group", "mean_bps", "p_bh"]]
+    q = t[["group_set", "group", "mean_bps", "p_bh", "obs_share"]].rename(columns={"mean_bps": "trader_bps", "p_bh": "trader_p_bh"}) \
+        .merge(mm.rename(columns={"mean_bps": "mm_bps", "p_bh": "mm_p_bh"}), on=["group_set", "group"], how="left")
+    side = lambda bps, pb: np.where(pb < alpha, np.where(bps > 0, "賺", "虧"), "不確定")
+    q["market_maker"] = side(q["mm_bps"], q["mm_p_bh"])
+    q["trader"] = side(q["trader_bps"], q["trader_p_bh"])
+    q["quadrant"] = "造市商" + q["market_maker"] + "／交易者" + q["trader"]
+    return q
+
+
+def multiday_frame(days, data_dir, rv, tx, iv_cuts):
+    data_dir = Path(data_dir)
+    d, _ = toxicity.build(days, data_dir)
+    keep = ["trade_id", "warrant_id", "datetime", "side", "kind", "kind_sign", "iv", "S_ret_5m", "spot_1s", "tod",
+            "delta_bucket", "dte_bucket", "weight", "strike", "ratio", "delta", "S_mid", "close", "pre_mid"]
+    d = d[keep].copy()
+    ex = pd.concat([pd.read_parquet(data_dir / "labels" / "exit_quotes" / f"{x}.parquet") for x in days], ignore_index=True)
+    d = d.merge(ex, on=["trade_id", "datetime", "warrant_id"], how="left", validate="one_to_one")
+    closes = daily_closes(data_dir).loc[lambda s: s.index.isin(days)]
+    mu = float(closes.pct_change().mean())
+    return multiday_metrics(add_conditions(d, rv, tx, iv_cuts), mu), mu
+
+
 # --- driver ----------------------------------------------------------------------------------
 
 def period_frame(days, data_dir, rv, tx, iv_cuts=None):
@@ -204,12 +342,36 @@ def run(data_dir, out_dir=None):
         quadrants(m26).to_parquet(out_dir / "retail_quadrants_2026.parquet", index=False)
 
 
+def run_multiday(data_dir, out_dir=None):
+    data_dir = Path(data_dir)
+    out_dir = Path(out_dir or data_dir / "results" / "extension")
+    days = sorted(p.stem for p in (data_dir / "panel" / "tsmc_warrant_trades").glob("*.parquet") if config.in_sample(p.stem))
+    rv, tx = realised_vol(daily_closes(data_dir)), load_tx(data_dir)
+    p1 = pd.read_parquet(out_dir / "retail_map_2025.parquet")
+    cuts = (p1["iv_cut_lo"].iloc[0], p1["iv_cut_hi"].iloc[0])
+    include = set(map(tuple, p1.loc[p1["include"], ["sample", "group_set", "group"]].to_numpy()))
+    k_inc = None
+    for label, ds in [("2025", [x for x in days if x <= config.TRAIN_END]), ("2026", [x for x in days if x >= config.TEST_START])]:
+        if not ds:
+            continue
+        d, mu = multiday_frame(ds, data_dir, rv, tx, cuts)
+        md, k_new = multiday_finalise(multiday_map(d), include, k_inc)
+        if k_inc is None:                                        # 2026 reuses the 2025 per-k inclusion
+            k_inc = k_new
+        multiday_summary(d).to_parquet(out_dir / f"retail_multiday_summary_{label}.parquet", index=False)
+        md.assign(mu_daily=mu).to_parquet(out_dir / f"retail_multiday_map_{label}.parquet", index=False)
+        p1y = pd.read_parquet(out_dir / f"retail_map_{label}.parquet")
+        multiday_quadrants(md, p1y).to_parquet(out_dir / f"retail_multiday_quadrants_{label}.parquet", index=False)
+        del d
+
+
 def main(argv=None):
-    p = argparse.ArgumentParser(description="Who wins / who loses: market maker vs trader map (intraday)")
+    p = argparse.ArgumentParser(description="Who wins / who loses: market maker vs trader map")
     p.add_argument("--data", default="../data")
     p.add_argument("--out", default=None, help="default: <data>/results/extension")
+    p.add_argument("--multiday", action="store_true", help="phase 2: multi-day holding (needs labels/exit_quotes)")
     a = p.parse_args(argv)
-    run(a.data, a.out)
+    run_multiday(a.data, a.out) if a.multiday else run(a.data, a.out)
 
 
 if __name__ == "__main__":

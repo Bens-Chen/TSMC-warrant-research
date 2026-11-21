@@ -29,6 +29,12 @@ point τ, the at-trade mid IV of the warrant's last quoted trade at or before τ
 IVs at the solver bounds are dropped). Built from the panel only; it is a label because E reads it at
 grid points after each trade.
 
+Close quotes (``build_close_quotes``, labels/close_quotes/<day>.parquet, who-wins phase 2): per warrant
+the last valid bid / ask shown before 13:25 that day (backward within the day). Exit labels
+(``build_exit_labels``, labels/exit_quotes/<day>.parquet): for each trade and k in
+config.RETAIL_HOLD_DAYS, the close quotes of the k-th in-sample trading day after the trade, the 2330 close
+that day, whether the warrant expired by then, and the 2330 close used to settle it.
+
 Build every day:  python -m wtox.research.markout --data ../data
 """
 
@@ -161,6 +167,48 @@ def build_iv_path(panel, day, grid=None):
     return m[["warrant_id", "tau"]].assign(iv_tau=m["iv"].to_numpy()).sort_values(["warrant_id", "tau"]).reset_index(drop=True)
 
 
+def build_close_quotes(warrants):
+    w = _session(warrants).sort_values("datetime", kind="mergesort")
+    out = []
+    for side in ("bid", "ask"):
+        v = w[w[f"{side}_price"] > 0].groupby("warrant_id").last()
+        out.append(v[[f"{side}_price", "datetime"]].rename(columns={f"{side}_price": side, "datetime": f"{side}_time"}))
+    if not out[0].index.size and not out[1].index.size:
+        return pd.DataFrame(columns=["warrant_id", "bid", "bid_time", "ask", "ask_time"])
+    return pd.concat(out, axis=1).rename_axis("warrant_id").reset_index()
+
+
+def build_exit_labels(panel, day, days, close_quotes, closes):
+    """panel: one day (KEY + T). days: sorted in-sample days. close_quotes: day -> frame (or None).
+    closes: Series day -> 2330 13:25 mid (in-sample days)."""
+    out = panel[KEY].copy()
+    i = days.index(day)
+    expiry = (pd.Timestamp(day) + pd.to_timedelta(np.round(panel["T"].to_numpy(float) * config.DAYS_PER_YEAR), unit="D"))
+    cdays = pd.to_datetime(pd.Index(closes.index))
+    for k in config.RETAIL_HOLD_DAYS:
+        if i + k >= len(days):
+            for c in ("exit_day", "bid", "ask", "bid_age_s", "S_close", "expired", "S_settle"):
+                out[f"{c}_{k}"] = np.nan
+            continue
+        ex = days[i + k]
+        q = close_quotes(ex)
+        m = out[["warrant_id"]].merge(q[["warrant_id", "bid", "ask", "bid_time"]], on="warrant_id", how="left") if q is not None \
+            else pd.DataFrame({"bid": np.nan, "ask": np.nan, "bid_time": pd.NaT}, index=range(len(out)))
+        out[f"exit_day_{k}"] = ex
+        out[f"bid_{k}"] = m["bid"].to_numpy()
+        out[f"ask_{k}"] = m["ask"].to_numpy()
+        close_t = pd.Timestamp(ex) + config.CONTINUOUS_END
+        out[f"bid_age_s_{k}"] = (close_t - pd.to_datetime(m["bid_time"])).dt.total_seconds().to_numpy()
+        out[f"expiry_{k}"] = expiry
+        out[f"S_close_{k}"] = closes.get(ex, np.nan)
+        exp = expiry <= pd.Timestamp(ex)
+        out[f"expired_{k}"] = np.asarray(exp)
+        pos = cdays.searchsorted(expiry, side="right") - 1          # last in-sample close on or before expiry
+        settle = np.where(pos >= 0, closes.to_numpy()[np.clip(pos, 0, None)], np.nan)
+        out[f"S_settle_{k}"] = np.where(exp, settle, np.nan)
+    return out
+
+
 def build_day(day, data_dir, panel_dir):
     data_dir = Path(data_dir)
     ppath = Path(panel_dir) / f"{day}.parquet"
@@ -193,6 +241,10 @@ def main(argv=None):
     plc_out.mkdir(parents=True, exist_ok=True)
     iv_out = out.parent / "iv_path"
     iv_out.mkdir(parents=True, exist_ok=True)
+    cq_out = out.parent / "close_quotes"
+    cq_out.mkdir(parents=True, exist_ok=True)
+    ex_out = out.parent / "exit_quotes"
+    ex_out.mkdir(parents=True, exist_ok=True)
     for ppath in sorted(panel_dir.glob("*.parquet")):
         day = ppath.stem
         if not config.in_sample(day):
@@ -213,6 +265,11 @@ def main(argv=None):
         if (a.rebuild or not ivp.exists() or ivp.stat().st_mtime <= ppath.stat().st_mtime) \
                 and set(iv_cols) <= set(pq.read_schema(ppath).names):
             build_iv_path(pd.read_parquet(ppath, columns=iv_cols), day).to_parquet(ivp, index=False)
+        cqp = cq_out / f"{day}.parquet"
+        files = sorted((data / "shioaji" / "ticks" / day).glob("*.parquet"))
+        if (a.rebuild or not cqp.exists()) and files:
+            cols = ["warrant_id", "datetime", "bid_price", "ask_price"]
+            build_close_quotes(pd.concat([pd.read_parquet(f, columns=cols) for f in files], ignore_index=True)).to_parquet(cqp, index=False)
         path = out / f"{day}.parquet"
         fresh = path.exists() and path.stat().st_mtime > ppath.stat().st_mtime   # equal mtime -> rebuild
         if fresh and not a.rebuild:
@@ -221,6 +278,31 @@ def main(argv=None):
         if len(labels):
             labels.to_parquet(path, index=False)
         print(day, len(labels), "labels")
+    build_all_exit_labels(data, panel_dir, ex_out, cq_out, out.parent / "tsmc_grid", a.rebuild)
+
+
+def build_all_exit_labels(data, panel_dir, ex_out, cq_out, grid_dir, rebuild=False):
+    """Second pass (needs every day's close quotes): forward-looking exit labels per trade."""
+    days = sorted(p.stem for p in Path(panel_dir).glob("*.parquet") if config.in_sample(p.stem))
+    closes = pd.Series({d: pd.read_parquet(Path(grid_dir) / f"{d}.parquet", columns=["S_mid_close"])["S_mid_close"].iloc[0]
+                        for d in days if (Path(grid_dir) / f"{d}.parquet").exists()})
+    cache = {}
+
+    def cq(d):
+        if d not in cache:
+            f = Path(cq_out) / f"{d}.parquet"
+            cache[d] = pd.read_parquet(f) if f.exists() else None
+        return cache[d]
+
+    for day in days:
+        f = Path(ex_out) / f"{day}.parquet"
+        pp = Path(panel_dir) / f"{day}.parquet"
+        if f.exists() and not rebuild and f.stat().st_mtime > pp.stat().st_mtime:
+            continue
+        if "T" not in pq.read_schema(pp).names:
+            continue
+        panel = pd.read_parquet(pp, columns=KEY + ["T"])
+        build_exit_labels(panel, day, days, cq, closes).to_parquet(f, index=False)
 
 
 if __name__ == "__main__":
