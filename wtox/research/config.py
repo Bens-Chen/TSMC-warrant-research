@@ -217,3 +217,7 @@ RETAIL_FLAT_BPS = 1.0                        # |past 5m return| below this = "fl
 RETAIL_TX_FILE = "futures_continuous/TX_continuous_1m_post_latest.parquet"
 RETAIL_TX_BAR = pd.Timedelta(minutes=1)      # a bar stamped ts is used only from ts + 1 min (no look-ahead either way)
 RETAIL_TX_MAX_STALE = pd.Timedelta(minutes=3)    # TAIEX futures bar older than this (or from an earlier day) -> no value
+
+# --- who wins / who loses, phase 2 multi-day (docs/decisions.md 2026-11-22, before any result) -------
+RETAIL_HOLD_DAYS = (1, 3, 5)                 # exit at the close of the k-th in-sample trading day after entry
+RETAIL_MAIN_HOLD = 5                         # quadrant classification horizon (arbitrary, stated)
