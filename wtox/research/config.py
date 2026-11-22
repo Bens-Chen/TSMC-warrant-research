@@ -223,3 +223,7 @@ RETAIL_HOLD_DAYS = (1, 3, 5)                 # exit at the close of the k-th in-
 RETAIL_MAIN_HOLD = 5                         # quadrant classification horizon (arbitrary, stated)
 RETAIL_MAX_BID_AGE = pd.Timedelta(minutes=30)    # sensitivity: exit bid quoted at most this long before 13:25
 RETAIL_LAST_TRADE_GAP = 1                    # <= this many trading days in (exit day, expiry]: past the last trading day
+
+# --- extension: cross-issuer comparison (docs/decisions.md, 2026-11-22, before any result) ----------
+CMP_MIN_PEERS = 3                            # peer group (day, kind, |delta| bucket, DTE bucket) needs >= 3 warrants with d-1 data
+CMP_MIN_ISSUER_SHARE = 0.01                  # issuers below 1% of 2025 retail-buy notional pooled as "其他"
