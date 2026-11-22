@@ -170,3 +170,52 @@ def test_exit_bid_age():
     panel = pd.DataFrame({"trade_id": [0], "datetime": pd.Timestamp("2025-03-03 10:00"), "warrant_id": ["A"], "T": [1.0]})
     e = markout.build_exit_labels(panel, "2025-03-03", days, q.get, pd.Series([1.0, 1.0], index=days))
     assert e.loc[0, "bid_age_s_1"] == 25 * 60                     # 13:00 quote at the 13:25 close
+
+
+def test_close_quotes_spot_at_bid_time():
+    from wtox.research import markout
+    day = "2025-03-03"
+    w = pd.DataFrame({"warrant_id": ["A", "A", "B"], "datetime": pd.to_datetime([f"{day} 10:00", f"{day} 12:40", f"{day} 13:10"]),
+                      "bid_price": [1.0, 1.5, 0.0], "ask_price": [1.1, 1.6, 0.2]})
+    s = pd.DataFrame({"datetime": pd.to_datetime([f"{day} 09:30", f"{day} 12:30", f"{day} 13:00"]),
+                      "bid_price": [99.0, 101.0, 103.0], "ask_price": [101.0, 103.0, 105.0], "close": 0.0})
+    q = markout.build_close_quotes(w, s).set_index("warrant_id")
+    assert q.loc["A", "S_at_bid"] == 102.0                 # 12:40 bid -> 12:30 spot mid, not the 13:00 one
+    assert np.isnan(q.loc["B", "S_at_bid"])                # ask only: no bid time
+
+
+def test_exit_labels_gap_after_last_trading_day():
+    from wtox.research import markout
+    days = ["2025-03-03", "2025-03-04", "2025-03-05", "2025-03-06", "2025-03-07", "2025-03-10", "2025-03-11"]
+    closes = pd.Series(np.arange(100.0, 107.0), index=days)
+    q = {d: pd.DataFrame({"warrant_id": ["A"], "bid": [1.0], "ask": [1.1], "bid_time": [pd.Timestamp(d) + pd.Timedelta("12h")],
+                         "S_at_bid": [50.0]}) for d in days}
+    # expiry 03-10: last trading day 03-06 (two trading days before); exit 03-07 is in the gap, exit 03-06 is not
+    panel = pd.DataFrame({"trade_id": [0, 1], "datetime": pd.Timestamp("2025-03-03 10:00"), "warrant_id": ["A", "B"],
+                          "T": [7 / 365, 7 / 365]})
+    e = markout.build_exit_labels(panel, "2025-03-03", days, q.get, closes)
+    assert not e.loc[0, "gap_3"] and not e.loc[0, "gap_1"]             # 03-06: 2 trading days to expiry
+    e2 = markout.build_exit_labels(panel.assign(T=6 / 365), "2025-03-04", days, q.get, closes)   # same expiry 03-10
+    assert e2.loc[0, "gap_3"] and not e2.loc[0, "expired_3"]           # 03-07: 1 trading day (03-10) to expiry
+    assert e2.loc[0, "S_bid_3"] == 50.0 and np.isnan(e2.loc[1, "S_bid_3"])
+
+
+def test_multiday_metrics_gap_settlement_and_spot_at_bid():
+    d = pd.DataFrame({"side": 1.0, "kind": ["call", "call", "call"], "strike": 100.0, "ratio": 0.1, "delta": 0.5,
+                      "S_mid": 100.0, "close": 1.0, "pre_mid": 1.0, "datetime": pd.Timestamp("2025-03-03 10:00")})
+    for k in config.RETAIL_HOLD_DAYS:
+        d[f"bid_{k}"] = [np.nan, 1.3, np.nan]
+        d[f"bid_age_s_{k}"] = [np.nan, 3600.0, np.nan]
+        d[f"S_bid_{k}"] = [np.nan, 102.0, np.nan]
+        d[f"S_close_{k}"] = 104.0
+        d[f"expired_{k}"] = False
+        d[f"gap_{k}"] = [True, False, False]
+        d[f"S_settle_{k}"] = np.nan
+        d[f"exit_day_{k}"] = "2025-03-10"
+        d[f"expiry_{k}"] = pd.Timestamp("2025-03-11")
+    m = retail.multiday_metrics(d, mu=0.0)
+    assert m["hold_raw_1"].iloc[0] == pytest.approx((0.4 - 1.0) - retail.COST_RT)   # intrinsic (104-100)*0.1
+    assert m["settled_gap_1"].iloc[0] == 1.0 and m["fresh_1"].iloc[0]
+    assert m["hold_dir_1"].iloc[1] == pytest.approx(0.5 * 0.1 * (102.0 - 100.0))     # spot at the bid's time
+    assert not m["fresh_1"].iloc[1]                                                  # 60-minute-old bid
+    assert np.isnan(m["hold_raw_1"].iloc[2]) and m["unobs_near_expiry_1"].iloc[2] == 1.0

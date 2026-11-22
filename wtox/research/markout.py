@@ -167,15 +167,24 @@ def build_iv_path(panel, day, grid=None):
     return m[["warrant_id", "tau"]].assign(iv_tau=m["iv"].to_numpy()).sort_values(["warrant_id", "tau"]).reset_index(drop=True)
 
 
-def build_close_quotes(warrants):
+def build_close_quotes(warrants, stock=None):
+    """Last valid bid / ask before 13:25 per warrant; S_at_bid = 2330 mid as of the bid's time (same day)."""
     w = _session(warrants).sort_values("datetime", kind="mergesort")
     out = []
     for side in ("bid", "ask"):
         v = w[w[f"{side}_price"] > 0].groupby("warrant_id").last()
         out.append(v[[f"{side}_price", "datetime"]].rename(columns={f"{side}_price": side, "datetime": f"{side}_time"}))
     if not out[0].index.size and not out[1].index.size:
-        return pd.DataFrame(columns=["warrant_id", "bid", "bid_time", "ask", "ask_time"])
-    return pd.concat(out, axis=1).rename_axis("warrant_id").reset_index()
+        return pd.DataFrame(columns=["warrant_id", "bid", "bid_time", "ask", "ask_time", "S_at_bid"])
+    q = pd.concat(out, axis=1).rename_axis("warrant_id").reset_index()
+    q["S_at_bid"] = np.nan
+    s = _stock_mids(stock) if stock is not None else pd.DataFrame()
+    ok = q["bid_time"].notna()
+    if len(s) and ok.any():
+        t = q.loc[ok, ["bid_time"]].astype({"bid_time": "datetime64[ns]"}).reset_index().sort_values("bid_time")
+        m = pd.merge_asof(t, s, left_on="bid_time", right_on="obs_time", direction="backward")
+        q.loc[m["index"].to_numpy(), "S_at_bid"] = m["mid"].to_numpy()
+    return q
 
 
 def build_exit_labels(panel, day, days, close_quotes, closes):
@@ -183,26 +192,34 @@ def build_exit_labels(panel, day, days, close_quotes, closes):
     closes: Series day -> 2330 13:25 mid (in-sample days)."""
     out = panel[KEY].copy()
     i = days.index(day)
+    cal = pd.DatetimeIndex(sorted(set(days) | {x for x in config.EXCLUDED_DAYS if days[0] <= x <= days[-1]}))
     expiry = (pd.Timestamp(day) + pd.to_timedelta(np.round(panel["T"].to_numpy(float) * config.DAYS_PER_YEAR), unit="D"))
     cdays = pd.to_datetime(pd.Index(closes.index))
     for k in config.RETAIL_HOLD_DAYS:
         if i + k >= len(days):
-            for c in ("exit_day", "bid", "ask", "bid_age_s", "S_close", "expired", "S_settle"):
+            for c in ("exit_day", "bid", "ask", "bid_age_s", "S_bid", "S_close", "expired", "S_settle", "gap"):
                 out[f"{c}_{k}"] = np.nan
             continue
         ex = days[i + k]
         q = close_quotes(ex)
-        m = out[["warrant_id"]].merge(q[["warrant_id", "bid", "ask", "bid_time"]], on="warrant_id", how="left") if q is not None \
+        cols = ["warrant_id", "bid", "ask", "bid_time"] + (["S_at_bid"] if q is not None and "S_at_bid" in q else [])
+        m = out[["warrant_id"]].merge(q[cols], on="warrant_id", how="left") if q is not None \
             else pd.DataFrame({"bid": np.nan, "ask": np.nan, "bid_time": pd.NaT}, index=range(len(out)))
+        if "S_at_bid" not in m:
+            m["S_at_bid"] = np.nan
         out[f"exit_day_{k}"] = ex
         out[f"bid_{k}"] = m["bid"].to_numpy()
         out[f"ask_{k}"] = m["ask"].to_numpy()
         close_t = pd.Timestamp(ex) + config.CONTINUOUS_END
         out[f"bid_age_s_{k}"] = (close_t - pd.to_datetime(m["bid_time"])).dt.total_seconds().to_numpy()
+        out[f"S_bid_{k}"] = m["S_at_bid"].to_numpy()
         out[f"expiry_{k}"] = expiry
         out[f"S_close_{k}"] = closes.get(ex, np.nan)
         exp = expiry <= pd.Timestamp(ex)
         out[f"expired_{k}"] = np.asarray(exp)
+        # past the last trading day (2 trading days before expiry): <= GAP trading days in (exit day, expiry]
+        after = cal.searchsorted(expiry, side="right") - cal.searchsorted(pd.Timestamp(ex), side="right")
+        out[f"gap_{k}"] = np.asarray(~exp & (expiry <= cal[-1]) & (after <= config.RETAIL_LAST_TRADE_GAP))
         pos = cdays.searchsorted(expiry, side="right") - 1          # last in-sample close on or before expiry
         settle = np.where(pos >= 0, closes.to_numpy()[np.clip(pos, 0, None)], np.nan)
         out[f"S_settle_{k}"] = np.where(exp, settle, np.nan)
@@ -267,9 +284,11 @@ def main(argv=None):
             build_iv_path(pd.read_parquet(ppath, columns=iv_cols), day).to_parquet(ivp, index=False)
         cqp = cq_out / f"{day}.parquet"
         files = sorted((data / "shioaji" / "ticks" / day).glob("*.parquet"))
-        if (a.rebuild or not cqp.exists()) and files:
+        if (a.rebuild or not cqp.exists() or "S_at_bid" not in pq.read_schema(cqp).names) and files:
             cols = ["warrant_id", "datetime", "bid_price", "ask_price"]
-            build_close_quotes(pd.concat([pd.read_parquet(f, columns=cols) for f in files], ignore_index=True)).to_parquet(cqp, index=False)
+            stock = pd.read_parquet(spath) if spath.exists() else None
+            build_close_quotes(pd.concat([pd.read_parquet(f, columns=cols) for f in files], ignore_index=True),
+                               stock).to_parquet(cqp, index=False)
         path = out / f"{day}.parquet"
         fresh = path.exists() and path.stat().st_mtime > ppath.stat().st_mtime   # equal mtime -> rebuild
         if fresh and not a.rebuild:
@@ -297,7 +316,8 @@ def build_all_exit_labels(data, panel_dir, ex_out, cq_out, grid_dir, rebuild=Fal
     for day in days:
         f = Path(ex_out) / f"{day}.parquet"
         pp = Path(panel_dir) / f"{day}.parquet"
-        if f.exists() and not rebuild and f.stat().st_mtime > pp.stat().st_mtime:
+        if f.exists() and not rebuild and f.stat().st_mtime > pp.stat().st_mtime \
+                and "gap_1" in pq.read_schema(f).names:
             continue
         if "T" not in pq.read_schema(pp).names:
             continue

@@ -220,35 +220,57 @@ def multiday_metrics(d, mu):
     d = d[d["side"] > 0].copy()
     for k in config.RETAIL_HOLD_DAYS:
         exp = d[f"expired_{k}"].astype("boolean").fillna(False).to_numpy(bool)
-        S_exit = np.where(exp, d[f"S_settle_{k}"], d[f"S_close_{k}"])
-        val = np.where(exp, intrinsic(d[f"S_settle_{k}"].to_numpy(float), d["strike"].to_numpy(float),
-                                      d["ratio"].to_numpy(float), d["kind"].to_numpy()), d[f"bid_{k}"])
-        val = np.where(exp | (d[f"bid_{k}"] > 0), val, np.nan)
+        quoted = (d[f"bid_{k}"] > 0).to_numpy(bool)
+        gap = (d[f"gap_{k}"].astype("boolean").fillna(False).to_numpy(bool) if f"gap_{k}" in d else np.zeros(len(d), bool)) \
+            & ~exp & ~quoted                                       # past the last trading day: no quote, settle at intrinsic
+        S_set = np.where(exp, d[f"S_settle_{k}"], d[f"S_close_{k}"])
+        settle = exp | gap
+        S_bid = d[f"S_bid_{k}"] if f"S_bid_{k}" in d else d[f"S_close_{k}"]
+        S_exit = np.where(settle, S_set, S_bid.fillna(d[f"S_close_{k}"]))   # spot at the exit quote's own time
+        val = np.where(settle, intrinsic(S_set.astype(float), d["strike"].to_numpy(float),
+                                         d["ratio"].to_numpy(float), d["kind"].to_numpy()), d[f"bid_{k}"])
+        val = np.where(settle | quoted, val, np.nan)
         raw = (val - d["close"]) / d["pre_mid"] - COST_RT
         expo = d["side"] * d["delta"] * d["ratio"] / d["pre_mid"]
         d[f"hold_raw_{k}"] = raw
         d[f"hold_dt_{k}"] = raw - expo * d["S_mid"] * mu * k
         d[f"hold_dir_{k}"] = (expo * (S_exit - d["S_mid"])).where(raw.notna())
         d[f"hold_resid_{k}"] = raw - d[f"hold_dir_{k}"]
-        # unobserved exits close to expiry (likely after the last trading day, before expiry: no quote)
+        # unobserved exits close to expiry (diagnostic: should be ~0 after the gap settlement)
         near = (pd.to_datetime(d[f"expiry_{k}"]) - pd.to_datetime(d[f"exit_day_{k}"])).dt.days.between(0, 14)
         d[f"unobs_near_expiry_{k}"] = (raw.isna() & near & ~exp).astype(float)
         d[f"expired_share_{k}"] = exp.astype(float)
+        d[f"settled_gap_{k}"] = (gap & raw.notna().to_numpy(bool)).astype(float)
+        d[f"s_bid_fallback_{k}"] = (quoted & ~settle & S_bid.isna().to_numpy(bool)).astype(float)   # 13:25 spot used
+        age = d[f"bid_age_s_{k}"] if f"bid_age_s_{k}" in d else pd.Series(np.nan, index=d.index)
+        d[f"fresh_{k}"] = settle | (quoted & (age <= config.RETAIL_MAX_BID_AGE.total_seconds()).to_numpy(bool))
     return d
 
 
 def multiday_summary(d):
-    """Per k: exit coverage, expiry settlement, unobserved exits near expiry, exit-bid age."""
+    """Per k: exit coverage, expiry / gap settlement, unobserved exits near expiry, exit-bid age, and the
+    fresh-quote sensitivity (exit bid at most RETAIL_MAX_BID_AGE before 13:25, or settled)."""
     rows = []
+    day = d["datetime"].dt.normalize().to_numpy()
+    all_days = np.sort(np.unique(day))
     for k in config.RETAIL_HOLD_DAYS:
         w = d["weight"]
         obs = d[f"hold_raw_{k}"].notna()
         for scope, m in [("all", pd.Series(True, index=d.index)), ("dte_1-30", d["dte_bucket"].astype(str) == "1–30")]:
             ww = w[m]
-            rows.append({"hold": k, "scope": scope, "obs_share": float(ww[obs[m]].sum() / ww.sum()),
-                         "expired_share": float((d.loc[m, f"expired_share_{k}"] * ww).sum() / ww.sum()),
-                         "unobs_near_expiry_share": float((d.loc[m, f"unobs_near_expiry_{k}"] * ww).sum() / ww.sum()),
-                         "bid_age_median_s": float(d.loc[m & obs, f"bid_age_s_{k}"].median())})
+            share = lambda c: float((d.loc[m, c] * ww).sum() / ww.sum())
+            row = {"hold": k, "scope": scope, "obs_share": float(ww[obs[m]].sum() / ww.sum()),
+                   "expired_share": share(f"expired_share_{k}"), "settled_gap_share": share(f"settled_gap_{k}"),
+                   "unobs_near_expiry_share": share(f"unobs_near_expiry_{k}"),
+                   "s_bid_fallback_share": share(f"s_bid_fallback_{k}"),
+                   "bid_age_median_s": float(d.loc[m & obs & (d[f"bid_{k}"] > 0), f"bid_age_s_{k}"].median()),
+                   "fresh_share_of_obs": float(ww[(obs & d[f"fresh_{k}"])[m]].sum() / ww[obs[m]].sum())}
+            for v in ("dt", "resid"):
+                for sub, mm in [("all", m & obs), ("fresh", m & obs & d[f"fresh_{k}"])]:
+                    mean, se, n, _ = nw_mean(d.loc[mm, f"hold_{v}_{k}"].to_numpy(float), d.loc[mm, "weight"].to_numpy(float),
+                                             day[mm.to_numpy()], k, all_days)
+                    row[f"{v}_{sub}_bps"], row[f"{v}_{sub}_se_bps"] = mean * 1e4, se * 1e4
+            rows.append(row)
     return pd.DataFrame(rows)
 
 
@@ -302,6 +324,8 @@ def multiday_frame(days, data_dir, rv, tx, iv_cuts):
             "delta_bucket", "dte_bucket", "weight", "strike", "ratio", "delta", "S_mid", "close", "pre_mid"]
     d = d[keep].copy()
     ex = pd.concat([pd.read_parquet(data_dir / "labels" / "exit_quotes" / f"{x}.parquet") for x in days], ignore_index=True)
+    if not {"S_bid_1", "gap_1"} <= set(ex.columns):
+        raise RuntimeError("exit_quotes predate the spot-at-bid / gap correction: run python -m wtox.research.markout")
     d = d.merge(ex, on=["trade_id", "datetime", "warrant_id"], how="left", validate="one_to_one")
     closes = daily_closes(data_dir).loc[lambda s: s.index.isin(days)]
     mu = float(closes.pct_change().mean())

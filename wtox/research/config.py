@@ -221,3 +221,5 @@ RETAIL_TX_MAX_STALE = pd.Timedelta(minutes=3)    # TAIEX futures bar older than 
 # --- who wins / who loses, phase 2 multi-day (docs/decisions.md 2026-11-22, before any result) -------
 RETAIL_HOLD_DAYS = (1, 3, 5)                 # exit at the close of the k-th in-sample trading day after entry
 RETAIL_MAIN_HOLD = 5                         # quadrant classification horizon (arbitrary, stated)
+RETAIL_MAX_BID_AGE = pd.Timedelta(minutes=30)    # sensitivity: exit bid quoted at most this long before 13:25
+RETAIL_LAST_TRADE_GAP = 1                    # <= this many trading days in (exit day, expiry]: past the last trading day
