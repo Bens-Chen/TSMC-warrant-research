@@ -88,10 +88,13 @@ tab(pick(rd("stage3/delta_dte.parquet"), ["delta_bucket", "dte_bucket", "value",
 sec("H2：markout 曲線（未去趨勢與去趨勢）", "stage3/curves.parquet")
 cu = rd("stage3/curves.parquet")
 cu["grp"] = cu["cut"] + ":" + cu["group"].fillna("all")
-keep = ["all:all", "spot_1s:favourable", "spot_1s:none", "dte_bucket:1–30", "dte_bucket:>180"]
+keep = ["all:all", "spot_1s:favourable", "spot_1s:none", "dte_bucket:1–30", "dte_bucket:>180", "delta_bucket:<0.2",
+        "delta_bucket:>0.6", "size_bucket:1–10", "size_bucket:>100"]
 for pre in ("M_", "M_dt_"):
     c = cu[cu["grp"].isin(keep) & cu["value"].str.match(pre + r"(1s|5s|10s|30s|1m|5m|30m|close)$")]
     tab(c.pivot_table(index="grp", columns="horizon", values="mean_bps")[["1s", "5s", "10s", "30s", "1m", "5m", "30m", "close"]].reset_index())
+sec("截短（2025，可算指標的成交）", "stage3/truncation.parquet")
+tab(rd("stage3/truncation.parquet"), 4)
 sec("H3：發行商（組成控制後）", "stage4/h3_issuers.parquet")
 tab(rd("stage4/h3_issuers.parquet"))
 sec("H4：迴歸（2025）", "stage3/h4_regressions.parquet")

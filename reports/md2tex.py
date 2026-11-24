@@ -19,7 +19,7 @@ PREAMBLE = r"""\documentclass[12pt,a4paper]{article}
 \setCJKmainfont[BoldFont={Heiti TC}]{Songti TC}
 \setCJKsansfont{Heiti TC}
 \xeCJKsetup{CJKecglue={ }}
-\usepackage{graphicx,tabularx,booktabs,caption,float,array}
+\usepackage{graphicx,tabularx,booktabs,caption,float,array,indentfirst}
 \usepackage[hidelinks]{hyperref}
 \captionsetup{font=small,labelformat=empty,skip=4pt}
 \linespread{1.45}
@@ -82,6 +82,8 @@ def convert(md):
                     i += 1
                 out.append(r"\end{quote}")
                 continue
+            if section == "附錄":
+                out.append(r"\clearpage")
             out.append(r"\section*{" + inline(section) + "}")
         elif ln.startswith("### "):
             out.append(r"\subsection*{" + inline(ln[4:]) + "}")
