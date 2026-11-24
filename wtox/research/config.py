@@ -60,7 +60,9 @@ DIVIDEND_MIN_WARRANTS = 10           # a TWSE adjustment date counts as an ex-da
 
 # --- hedge-cost inputs (CLAUDE.md §3.3); scenarios are built in toxicity.py ------------------
 # Statutory rates; the effective brokerage discount and spread scenarios are set in stage 3.
-STOCK_TRANSACTION_TAX = 0.003        # 證交稅, stock sell side only
+STOCK_TRANSACTION_TAX = 0.003        # 證交稅, stock sell side only (general rate)
+STOCK_HEDGE_TAX = 0.001              # 權證發行人避險專戶賣出標的股票 2023-11-10 to 2028-11-09 (decisions.md 2026-11-24)
+ROBUST_STOCK_HEDGE_TAX = STOCK_TRANSACTION_TAX   # sensitivity: hedging sales outside the reduced-rate scope
 BROKERAGE_FEE_MAX = 0.001425         # 手續費 statutory cap, both sides, before discount
 SINGLE_STOCK_FUTURES_TAX = 0.00002   # 期交稅 on stock futures, both sides
 
@@ -87,9 +89,9 @@ DETREND_HORIZONS = ("5m", "30m", "close")    # main de-trended; shorter ones de-
 # (the issuer's whole 2330 book for the day). c covers the initial delta hedge only: gamma re-hedging and
 # vega P&L from re-marking IV are NOT included, so short-dated ATM warrants cost more than this.
 HEDGE_SCENARIOS = {
-    "pessimistic": {"instrument": "stock", "tax": STOCK_TRANSACTION_TAX / 2, "fee": BROKERAGE_FEE_MAX,
+    "pessimistic": {"instrument": "stock", "tax": STOCK_HEDGE_TAX / 2, "fee": BROKERAGE_FEE_MAX,
                     "netting": "none"},
-    "neutral": {"instrument": "stock", "tax": STOCK_TRANSACTION_TAX / 2, "fee": 0.3 * BROKERAGE_FEE_MAX,
+    "neutral": {"instrument": "stock", "tax": STOCK_HEDGE_TAX / 2, "fee": 0.3 * BROKERAGE_FEE_MAX,
                 "netting": "warrant_day"},
     "optimistic": {"instrument": "stock_futures", "tax": SINGLE_STOCK_FUTURES_TAX, "fee": 0.0,
                    "netting": "issuer_day"},

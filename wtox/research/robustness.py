@@ -168,6 +168,9 @@ def variants(d, data_dir, drifts):
         rows.append(summary(recompute(d, drifts, r=r), f"risk_free_{r:.3f}"))
     rows.append(summary(recompute(d, drifts, q=unprotected_q(d, dividends.load(data_dir))), "q_unprotected"))
     rows.append(summary(d[~d["S_mid_is_trade"] & ~d[f"S_is_trade_{MAIN}"].astype(bool)], "spot_quote_only"))
+    tax_hi = {k: (dict(v, tax=config.ROBUST_STOCK_HEDGE_TAX / 2) if v["instrument"] == "stock" else v)
+              for k, v in config.HEDGE_SCENARIOS.items()}
+    rows.append(summary(toxicity.hedge_costs(d.copy(), tax_hi), f"stock_hedge_tax_{config.ROBUST_STOCK_HEDGE_TAX:.3f}"))
     for x in config.ROBUST_LARGE_ORDER:
         rows.append(summary(d.assign(large=np.where(d["order_volume"] >= x, f">={x}", f"<{x}")), f"large_{x}", ["large"]))
     rows.append(summary(d, "spot_move_5s", ["spot_5s"]).assign(base_variant="spot_move_1s"))
